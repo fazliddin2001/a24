@@ -40,32 +40,10 @@
       </div>
 
       <div class="avatar-container" id="avatarContainer">
-        <img src="assets/avatar.webp" alt="ADCHTI Raqamli Assistent" class="avatar-base-img" />
-        
-        <!-- Animated Mouth SVG Overlay -->
-        <svg class="mouth-svg" viewBox="0 0 160 75" aria-hidden="true">
-          <defs>
-            <radialGradient id="skinBlend" cx="48%" cy="42%" r="66%">
-              <stop offset="0%" stop-color="#f5b9a2" stop-opacity=".99"/>
-              <stop offset="53%" stop-color="#f5b9a2" stop-opacity=".93"/>
-              <stop offset="78%" stop-color="#f5b9a2" stop-opacity=".55"/>
-              <stop offset="100%" stop-color="#f5b9a2" stop-opacity="0"/>
-            </radialGradient>
-            <linearGradient id="lipTint" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#b84d59"/>
-              <stop offset="55%" stop-color="#e98583"/>
-              <stop offset="100%" stop-color="#d86b78"/>
-            </linearGradient>
-          </defs>
-          <ellipse cx="80" cy="37" rx="77" ry="35" fill="url(#skinBlend)"/>
-          <g class="mouth-move" id="mouthMove">
-            <path d="M 9 34 C 22 20, 46 18, 64 23 C 75 26, 80 26, 91 23 C 111 18, 138 20, 151 34 C 142 56, 119 65, 80 65 C 42 65, 18 55, 9 34 Z" fill="#633039"/>
-            <path d="M 20 29 C 39 24, 56 24, 67 28 C 76 30, 84 30, 93 28 C 107 24, 124 25, 140 29 C 130 35, 111 37, 80 37 C 49 37, 30 35, 20 29 Z" fill="#fff7ef"/>
-            <path d="M 9 34 C 25 25, 44 20, 64 24 C 74 27, 82 27, 93 24 C 114 20, 136 26, 151 34" fill="none" stroke="#9c4854" stroke-width="4.4" stroke-linecap="round"/>
-            <path d="M 12 49 C 29 58, 51 62, 80 62 C 109 62, 131 58, 148 49 C 132 65, 108 70, 80 70 C 52 70, 28 65, 12 49 Z" fill="url(#lipTint)"/>
-            <path d="M 29 55 C 50 62, 110 62, 131 55" fill="none" stroke="#f5aaa2" stroke-width="2.2" stroke-linecap="round" opacity=".85"/>
-          </g>
-        </svg>
+        <img src="assets/avatar-idle.webp" alt="ADCHTI Raqamli Assistent" class="avatar-layer active" id="frameIdle" />
+        <img src="assets/avatar-talk-small.webp" alt="" class="avatar-layer" id="frameTalkSmall" />
+        <img src="assets/avatar-talk-open.webp" alt="" class="avatar-layer" id="frameTalkOpen" />
+        <img src="assets/avatar-blink.webp" alt="" class="avatar-layer" id="frameBlink" />
       </div>
 
       <h2 class="avatar-title">Malika</h2>
