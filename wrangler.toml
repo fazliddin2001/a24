@@ -1,15 +1,10 @@
-name = "adchti-ai-assistant"
+name = "a24"
+main = "src/index.js"
 compatibility_date = "2024-09-23"
-pages_build_output_dir = "public"
+assets = { directory = "./public" }
 
 [vars]
 AI_GATEWAY_NAME = "adchti-gemini-gateway"
 GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_TTS_MODEL = "gemini-3.8-flash-tts"
 GEMINI_VOICE = "Aoede"
-
-# Set secrets via Cloudflare Dashboard or wrangler secret put:
-# GEMINI_API_KEY = "..."
-# CLOUDFLARE_ACCOUNT_ID = "..."
-# APP_PASSWORD = "..."
-# SESSION_SECRET = "..."
