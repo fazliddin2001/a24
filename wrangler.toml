@@ -4,8 +4,10 @@ compatibility_date = "2024-09-23"
 assets = { directory = "./public" }
 
 [vars]
-CLOUDFLARE_ACCOUNT_ID = "013eea585e696c68d17848038a22f355"
+
 AI_GATEWAY_NAME = "adchti-gemini-gateway"
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_TTS_MODEL = "gemini-2.5-flash"
+CLOUDFLARE_ACCOUNT_ID = "013eea585e696c68d17848038a22f355"
+GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_TTS_MODEL = "gemini-3.8-flash-tts"
 GEMINI_VOICE = "Aoede"
+
