@@ -30,9 +30,22 @@ export class AuthManager {
     this.input.value = '';
   }
 
+  static getToken() {
+    return localStorage.getItem('a24_token') || '';
+  }
+
+  static getAuthHeaders() {
+    const token = AuthManager.getToken();
+    return token ? { 'Authorization': `Bearer ${token}` } : {};
+  }
+
   async checkAuth() {
+    const token = AuthManager.getToken();
     try {
-      const res = await fetch('/api/auth/check');
+      const res = await fetch('/api/auth/check', {
+        headers: AuthManager.getAuthHeaders(),
+        credentials: 'include'
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.authenticated) {
@@ -61,11 +74,15 @@ export class AuthManager {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ password })
       });
 
       const data = await res.json();
       if (res.ok && data.success) {
+        if (data.token) {
+          localStorage.setItem('a24_token', data.token);
+        }
         this.hideModal();
         if (this.onAuthenticated) this.onAuthenticated();
       } else {

@@ -12,20 +12,20 @@ export default {
         const secret = env.SESSION_SECRET || env.APP_PASSWORD;
         if (!secret) {
           return new Response(JSON.stringify({
-            error: "Tizim xatoligi: SESSION_SECRET yoki APP_PASSWORD o'rnatilmagan"
+            error: "Tizim xatoligi: Cloudflare boshqaruv panelida APP_PASSWORD kiritilmagan (Missing APP_PASSWORD in Cloudflare Variables and Secrets)"
           }), {
             status: 500,
             headers: { 'Content-Type': 'application/json' }
           });
         }
 
+        // Check both Cookie and Authorization Bearer header
         const cookies = parseCookies(request.headers.get('Cookie'));
         let token = cookies['a24_session'];
-        if (!token) {
-          const authHeader = request.headers.get('Authorization');
-          if (authHeader && authHeader.startsWith('Bearer ')) {
-            token = authHeader.substring(7).trim();
-          }
+        
+        const authHeader = request.headers.get('Authorization');
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          token = authHeader.substring(7).trim();
         }
 
         const session = await verifySessionToken(token, secret);
@@ -58,7 +58,7 @@ export default {
           status: 200,
           headers: {
             'Content-Type': 'application/json',
-            'Set-Cookie': 'a24_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0'
+            'Set-Cookie': 'a24_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'
           }
         });
       }
@@ -97,7 +97,7 @@ async function handleLogin(request, env) {
     const expectedPassword = env.APP_PASSWORD;
     if (!expectedPassword) {
       return new Response(JSON.stringify({
-        error: "Tizim xatoligi: APP_PASSWORD Cloudflare sozlamalarida o'rnatilmagan"
+        error: "Tizim xatoligi: Cloudflare Settings > Variables and Secrets bo'limida APP_PASSWORD kiritilmagan"
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' }
@@ -112,10 +112,16 @@ async function handleLogin(request, env) {
       });
     }
 
+    // Generate signed HMAC token valid for 30 days
     const token = await createSessionToken('adchti_user', secret, 60 * 60 * 24 * 30);
-    const cookieHeader = `a24_session=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000`;
+    const cookieHeader = `a24_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`;
 
-    return new Response(JSON.stringify({ success: true, message: 'Xush kelibsiz!' }), {
+    // Return token in both JSON body (for localStorage) and Set-Cookie
+    return new Response(JSON.stringify({
+      success: true,
+      token: token,
+      message: 'Xush kelibsiz!'
+    }), {
       status: 200,
       headers: {
         'Content-Type': 'application/json',
@@ -130,7 +136,47 @@ async function handleLogin(request, env) {
   }
 }
 
-// --- CHAT HANDLER (Gemini 3.8 Flash + Thinking Stripping + TTS) ---
+// --- HELPER: GEMINI API CALL WITH RETRIES & FALLBACK ---
+async function callGemini(baseUrl, models, payload, apiKey) {
+  let lastError = null;
+
+  for (const model of models) {
+    if (!model) continue;
+    const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`;
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        return { ok: true, data, modelUsed: model };
+      }
+
+      const errText = await res.text();
+      lastError = `Model ${model} (${res.status}): ${errText}`;
+
+      // If 404 (model not found), try next model in fallback list
+      if (res.status === 404) {
+        continue;
+      }
+
+      return { ok: false, error: lastError, status: res.status };
+    } catch (e) {
+      lastError = e.message;
+    }
+  }
+
+  return { ok: false, error: lastError || 'Gemini API javob bermadi', status: 500 };
+}
+
+// --- CHAT HANDLER ---
 async function handleChat(request, env) {
   try {
     const body = await request.json();
@@ -139,23 +185,25 @@ async function handleChat(request, env) {
     const apiKey = env.GEMINI_API_KEY;
     if (!apiKey) {
       return new Response(JSON.stringify({
-        error: "GEMINI_API_KEY o'rnatilmagan (Missing GEMINI_API_KEY in Cloudflare settings)"
+        error: "GEMINI_API_KEY o'rnatilmagan. Cloudflare Dashboard > Workers > a24 > Settings > Variables and Secrets bo'limida GEMINI_API_KEY qo'shing."
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    let baseUrl;
-    if (env.CLOUDFLARE_ACCOUNT_ID && env.AI_GATEWAY_NAME) {
-      baseUrl = `https://gateway.ai.cloudflare.com/v1/${env.CLOUDFLARE_ACCOUNT_ID}/${env.AI_GATEWAY_NAME}/google-ai-studio/v1beta`;
-    } else {
-      baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-    }
+    // Connect via Cloudflare AI Gateway
+    const accountId = env.CLOUDFLARE_ACCOUNT_ID || '013eea585e696c68d17848038a22f355';
+    const gatewayName = env.AI_GATEWAY_NAME || 'adchti-gemini-gateway';
+    const baseUrl = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayName}/google-ai-studio/v1beta`;
 
-    const modelName = env.GEMINI_MODEL || 'gemini-3.8-flash';
-    const ttsModelName = env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts';
-    const generateUrl = `${baseUrl}/models/${modelName}:generateContent?key=${apiKey}`;
+    // Candidate models with graceful fallback
+    const candidateModels = [
+      env.GEMINI_MODEL,
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash'
+    ].filter(Boolean);
 
     const MAX_HISTORY_MESSAGES = 6;
     const trimmedHistory = Array.isArray(history) ? history.slice(-MAX_HISTORY_MESSAGES) : [];
@@ -202,26 +250,20 @@ async function handleChat(request, env) {
       }
     };
 
-    const geminiRes = await fetch(generateUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(geminiPayload)
-    });
+    const result = await callGemini(baseUrl, candidateModels, geminiPayload, apiKey);
 
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text();
+    if (!result.ok) {
       return new Response(JSON.stringify({
-        error: `Gemini API xatoligi (${geminiRes.status}): ${errText}`
+        error: `Gemini Gateway xatoligi: ${result.error}`
       }), {
-        status: geminiRes.status,
+        status: result.status || 500,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    const geminiData = await geminiRes.json();
-    const rawAnswer = geminiData.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+    const rawAnswer = result.data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
 
-    // Strip Thinking Tokens
+    // Strip Thinking Tokens (<thought>...</thought>)
     let thoughtText = '';
     let cleanText = rawAnswer;
 
@@ -237,42 +279,37 @@ async function handleChat(request, env) {
     let speechMimeType = null;
 
     if (generateSpeech && cleanText) {
-      try {
-        const ttsUrl = `${baseUrl}/models/${ttsModelName}:generateContent?key=${apiKey}`;
-        const ttsPayload = {
-          contents: [{
-            parts: [{
-              text: `Quyidagi o'zbekcha matnni xushmuomala, tabiiy va ravon talaffuz bilan ovoz chiqarib o'qing: "${cleanText}"`
-            }]
-          }],
-          generationConfig: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: env.GEMINI_VOICE || "Aoede"
-                }
+      const candidateTtsModels = [
+        env.GEMINI_TTS_MODEL,
+        'gemini-2.5-flash',
+        'gemini-2.0-flash'
+      ].filter(Boolean);
+
+      const ttsPayload = {
+        contents: [{
+          parts: [{
+            text: `Quyidagi o'zbekcha matnni xushmuomala, tabiiy va ravon talaffuz bilan ovoz chiqarib o'qing: "${cleanText}"`
+          }]
+        }],
+        generationConfig: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: env.GEMINI_VOICE || "Aoede"
               }
             }
           }
-        };
-
-        const ttsRes = await fetch(ttsUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(ttsPayload)
-        });
-
-        if (ttsRes.ok) {
-          const ttsData = await ttsRes.json();
-          const audioPart = ttsData.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-          if (audioPart && audioPart.inlineData) {
-            speechAudio = audioPart.inlineData.data;
-            speechMimeType = audioPart.inlineData.mimeType || 'audio/mp3';
-          }
         }
-      } catch (ttsErr) {
-        console.error('TTS Generation error:', ttsErr);
+      };
+
+      const ttsResult = await callGemini(baseUrl, candidateTtsModels, ttsPayload, apiKey);
+      if (ttsResult.ok) {
+        const audioPart = ttsResult.data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+        if (audioPart && audioPart.inlineData) {
+          speechAudio = audioPart.inlineData.data;
+          speechMimeType = audioPart.inlineData.mimeType || 'audio/mp3';
+        }
       }
     }
 
@@ -323,15 +360,15 @@ async function handleTts(request, env) {
       });
     }
 
-    let baseUrl;
-    if (env.CLOUDFLARE_ACCOUNT_ID && env.AI_GATEWAY_NAME) {
-      baseUrl = `https://gateway.ai.cloudflare.com/v1/${env.CLOUDFLARE_ACCOUNT_ID}/${env.AI_GATEWAY_NAME}/google-ai-studio/v1beta`;
-    } else {
-      baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-    }
+    const accountId = env.CLOUDFLARE_ACCOUNT_ID || '013eea585e696c68d17848038a22f355';
+    const gatewayName = env.AI_GATEWAY_NAME || 'adchti-gemini-gateway';
+    const baseUrl = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayName}/google-ai-studio/v1beta`;
 
-    const ttsModelName = env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts';
-    const ttsUrl = `${baseUrl}/models/${ttsModelName}:generateContent?key=${apiKey}`;
+    const candidateTtsModels = [
+      env.GEMINI_TTS_MODEL,
+      'gemini-2.5-flash',
+      'gemini-2.0-flash'
+    ].filter(Boolean);
 
     const ttsPayload = {
       contents: [{
@@ -351,23 +388,15 @@ async function handleTts(request, env) {
       }
     };
 
-    const res = await fetch(ttsUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(ttsPayload)
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      return new Response(JSON.stringify({ error: `TTS xatoligi: ${errText}` }), {
-        status: res.status,
+    const ttsResult = await callGemini(baseUrl, candidateTtsModels, ttsPayload, apiKey);
+    if (!ttsResult.ok) {
+      return new Response(JSON.stringify({ error: `TTS xatoligi: ${ttsResult.error}` }), {
+        status: ttsResult.status || 500,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    const data = await res.json();
-    const audioPart = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-
+    const audioPart = ttsResult.data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
     if (!audioPart || !audioPart.inlineData) {
       return new Response(JSON.stringify({ error: "Audio ma'lumoti qaytmadi" }), {
         status: 502,

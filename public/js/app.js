@@ -147,11 +147,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...AuthManager.getAuthHeaders()
+        },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
 
       if (res.status === 401) {
+        localStorage.removeItem('a24_token');
         auth.showModal();
         avatar.setState('idle');
         return;
