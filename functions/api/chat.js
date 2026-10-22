@@ -25,7 +25,8 @@ export async function onRequestPost(context) {
       baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
     }
 
-    const modelName = env.GEMINI_MODEL || 'gemini-2.0-flash';
+    const modelName = env.GEMINI_MODEL || 'gemini-3.8-flash';
+    const ttsModelName = env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts';
     const generateUrl = `${baseUrl}/models/${modelName}:generateContent?key=${apiKey}`;
 
     // Context Turn Management: limit history to last 3-4 turns (6-8 messages)
@@ -116,7 +117,7 @@ export async function onRequestPost(context) {
 
     if (generateSpeech && cleanText) {
       try {
-        const ttsUrl = `${baseUrl}/models/${modelName}:generateContent?key=${apiKey}`;
+        const ttsUrl = `${baseUrl}/models/${ttsModelName}:generateContent?key=${apiKey}`;
         const ttsPayload = {
           contents: [{
             parts: [{

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler pages dev public",
-    "deploy": "wrangler pages deploy public"
+    "build": "echo 'Build complete'"
   },
   "devDependencies": {
     "wrangler": "^3.100.0"

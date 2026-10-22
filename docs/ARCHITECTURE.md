@@ -10,8 +10,8 @@ Loyiha talablariga muvofiq, eshitish (audio tahlil), fikrlash (mulohaza) va javo
 
 | Vazifa | Tavsiya etilgan Model | Parametrlar / Xususiyatlar | Nega aynan shu model? |
 | :--- | :--- | :--- | :--- |
-| **Eshitish va Fikrlash** *(Listening & Thinking)* | **`gemini-2.0-flash`** | Multimodal Audio Ingest (`audio/webm`, `audio/wav`), Thinking Tokens, System Prompt (1k-5k token) | O'zbek tilidagi og'zaki nutqni tashqi STT (Whisper) xatolarisiz to'g'ridan-to'g'ri akustik tahlil qiladi; tezkor fikrlaydi. |
-| **Nutqqa aylantirish** *(TTS / Audio Generation)* | **`gemini-2.0-flash` (Audio Modality)** | `responseModalities: ["AUDIO"]`, `voiceConfig: "Aoede"` (yoki `"Kore"`) | Alohida qimmat TTS serverlarsiz Gemini oilasi doirasida o'zbekcha ifodali ayol ovozida nutq sintez qiladi. |
+| **Eshitish va Fikrlash** *(Listening & Thinking)* | **`gemini-3.8-flash`** | Multimodal Audio Ingest (`audio/webm`, `audio/wav`), Kengaytirilgan Thinking darajalari, 1M context | 2.0 ga nisbatan ancha yuqori intellekt va mulohaza darajasi; o'zbek tilidagi sheva, qisqartma va audio shovqinlarni aniq tushunadi. |
+| **Nutqqa aylantirish** *(TTS / Audio Generation)* | **`gemini-3.8-flash-tts`** | Specialized Studio-grade TTS, `responseModalities: ["AUDIO"]`, `voiceConfig: "Aoede"` | 130+ tillarni qo'llab-quvvatlovchi maxsus studiya darajasidagi ovoz modeli; matndan chetga chiqmay tabiiy ayol ovozida o'qiydi. |
 
 ### 1.1. Eshitish va O'zbek Tili Muammosi Yechimi
 - **Muammo:** Ko'plab standart STT (Speech-to-Text) vositalari o'zbek tilidagi sheva so'zlar, qisqartmalar ("kontraktim", "perevod", "dekanatga", "hemis ochmayapti") va noaniq mikrofonda xato qiladi.

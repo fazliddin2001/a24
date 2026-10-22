@@ -27,8 +27,8 @@ export async function onRequestPost(context) {
       baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
     }
 
-    const modelName = env.GEMINI_MODEL || 'gemini-2.0-flash';
-    const ttsUrl = `${baseUrl}/models/${modelName}:generateContent?key=${apiKey}`;
+    const ttsModelName = env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts';
+    const ttsUrl = `${baseUrl}/models/${ttsModelName}:generateContent?key=${apiKey}`;
 
     const ttsPayload = {
       contents: [{

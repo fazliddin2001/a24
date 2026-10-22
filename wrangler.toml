@@ -4,7 +4,8 @@ pages_build_output_dir = "public"
 
 [vars]
 AI_GATEWAY_NAME = "adchti-gemini-gateway"
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_TTS_MODEL = "gemini-3.8-flash-tts"
 GEMINI_VOICE = "Aoede"
 
 # Set secrets via Cloudflare Dashboard or wrangler secret put:
