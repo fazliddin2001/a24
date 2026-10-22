@@ -1,0 +1,13 @@
+{
+  "name": "adchti-university-ai-assistant",
+  "version": "1.0.0",
+  "description": "University AI assistant with female animated avatar and Gemini models via Cloudflare AI Gateway",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler pages dev public",
+    "deploy": "wrangler pages deploy public"
+  },
+  "devDependencies": {
+    "wrangler": "^3.100.0"
+  }
+}

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1e4d92" />
+  <title>ADCHTI — Raqamli Ayol Assistent (Digital Assistant)</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- Top Header Navigation -->
+  <header>
+    <div class="logo-area">
+      <div class="crest-badge">A</div>
+      <div class="logo-text">
+        <h1>ADCHTI Digital Assistant</h1>
+        <p>Andijon davlat chet tillari instituti</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div class="turn-badge" id="turnBadge" title="Kontekst xotirasi chegarasi (3-4 muloqotdan so'ng yangilanadi)">
+        <span class="turn-dot"></span>
+        <span>Navbat: <strong id="turnCounter">1 / 4</strong></span>
+      </div>
+      <button class="btn-secondary-sm" id="resetBtn" title="Suhbat tarixini tozalash">🔄 Yangi suhbat</button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main>
+    <!-- Left Column: Avatar & Voice Interaction -->
+    <section class="avatar-section idle" id="avatarSection" aria-label="Institut yordamchisi avatari">
+      <div class="status-pill">
+        <span class="status-indicator-dot" id="statusDot"></span>
+        <span id="statusText">Tayyor (Ready)</span>
+      </div>
+
+      <div class="avatar-container" id="avatarContainer">
+        <img src="assets/avatar.webp" alt="ADCHTI Raqamli Assistent" class="avatar-base-img" />
+        
+        <!-- Animated Mouth SVG Overlay -->
+        <svg class="mouth-svg" viewBox="0 0 160 75" aria-hidden="true">
+          <defs>
+            <radialGradient id="skinBlend" cx="48%" cy="42%" r="66%">
+              <stop offset="0%" stop-color="#f5b9a2" stop-opacity=".99"/>
+              <stop offset="53%" stop-color="#f5b9a2" stop-opacity=".93"/>
+              <stop offset="78%" stop-color="#f5b9a2" stop-opacity=".55"/>
+              <stop offset="100%" stop-color="#f5b9a2" stop-opacity="0"/>
+            </radialGradient>
+            <linearGradient id="lipTint" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#b84d59"/>
+              <stop offset="55%" stop-color="#e98583"/>
+              <stop offset="100%" stop-color="#d86b78"/>
+            </linearGradient>
+          </defs>
+          <ellipse cx="80" cy="37" rx="77" ry="35" fill="url(#skinBlend)"/>
+          <g class="mouth-move" id="mouthMove">
+            <path d="M 9 34 C 22 20, 46 18, 64 23 C 75 26, 80 26, 91 23 C 111 18, 138 20, 151 34 C 142 56, 119 65, 80 65 C 42 65, 18 55, 9 34 Z" fill="#633039"/>
+            <path d="M 20 29 C 39 24, 56 24, 67 28 C 76 30, 84 30, 93 28 C 107 24, 124 25, 140 29 C 130 35, 111 37, 80 37 C 49 37, 30 35, 20 29 Z" fill="#fff7ef"/>
+            <path d="M 9 34 C 25 25, 44 20, 64 24 C 74 27, 82 27, 93 24 C 114 20, 136 26, 151 34" fill="none" stroke="#9c4854" stroke-width="4.4" stroke-linecap="round"/>
+            <path d="M 12 49 C 29 58, 51 62, 80 62 C 109 62, 131 58, 148 49 C 132 65, 108 70, 80 70 C 52 70, 28 65, 12 49 Z" fill="url(#lipTint)"/>
+            <path d="M 29 55 C 50 62, 110 62, 131 55" fill="none" stroke="#f5aaa2" stroke-width="2.2" stroke-linecap="round" opacity=".85"/>
+          </g>
+        </svg>
+      </div>
+
+      <h2 class="avatar-title">Malika</h2>
+      <p class="avatar-subtitle">Institut ma’lumotlari, statistikasi va talabalar uchun yordamchi</p>
+
+      <!-- Microphone & Waveform -->
+      <div class="voice-control-box">
+        <div class="waveform-box" id="waveformBox">
+          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
+          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
+          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
+          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
+        </div>
+        <button class="mic-button" id="micButton" title="Ovozli savol berish uchun bosing">🎙</button>
+        <span class="mic-hint">Gapirish uchun mikrofonni bosing</span>
+      </div>
+    </section>
+
+    <!-- Right Column: Interactive Chat & History -->
+    <section class="chat-section">
+      <div class="chat-history" id="chatHistory">
+        <!-- Default Welcome Greeting -->
+        <div class="message assistant">
+          <div class="message-bubble">
+            <div class="message-text">
+              Assalomu alaykum! Men Andijon davlat chet tillari institutining raqamli ovozli yordamchisiman. Institut fakultetlari, qabul, to'lov-shartnomasi yoki talabalar turar joyi haqida qanday ma’lumot kerak?
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Suggestion Chips -->
+      <div class="quick-prompts">
+        <button class="quick-chip" data-q="Institutda qanday fakultetlar bor?">🏛 Fakultetlar</button>
+        <button class="quick-chip" data-q="Talabalar turar joyiga qanday ariza topshiriladi?">🏠 Yotoqxona (TTJ)</button>
+        <button class="quick-chip" data-q="Institut statistikasi va talabalar soni haqida ma'lumot bering">📊 Statistika</button>
+        <button class="quick-chip" data-q="HEMIS tizimiga qanday kiriladi?">💻 HEMIS</button>
+      </div>
+
+      <!-- Text Input Bar (Alternative to Audio) -->
+      <div class="chat-input-area">
+        <input type="text" id="textInput" class="text-input" placeholder="Savolingizni yozing yoki mikrofon orqali ayting..." />
+        <button id="sendBtn" class="send-btn">Yuborish</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Single Password Authentication Modal -->
+  <div class="modal-overlay" id="authModal">
+    <div class="auth-card">
+      <div class="auth-lock-icon">🔒</div>
+      <h2>ADCHTI Assistant</h2>
+      <p>Iltimos, tizimga kirish uchun maxfiy parolni kiriting.</p>
+      <input type="password" id="authPasswordInput" class="auth-input" placeholder="Parolni kiriting..." autocomplete="current-password" />
+      <button id="authSubmitBtn" class="auth-btn">Kirish</button>
+      <div class="auth-error" id="authError"></div>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

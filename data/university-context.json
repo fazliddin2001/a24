@@ -1,0 +1,52 @@
+{
+  "institute": {
+    "name": "Andijon davlat chet tillari instituti (ADCHTI)",
+    "shortName": "ADCHTI",
+    "location": "Andijon shahri, Bobur shohko'chasi",
+    "established": "O'zbekiston Respublikasi Prezidentining tegishli qarori asosida tashkil etilgan",
+    "statistics": {
+      "totalStudents": "6,500+",
+      "professorsAndStaff": "320+",
+      "departments": "18 ta kafedra",
+      "facultiesCount": 4,
+      "internationalPartners": "25+ xorijiy universitetlar (AQSH, Buyuk Britaniya, Germaniya, Xitoy, Yaponiya, Koreya)"
+    },
+    "faculties": [
+      {
+        "name": "Ingliz tili va adabiyoti fakulteti",
+        "directions": ["Filologiya va tillarni o'qitish (ingliz tili)", "Gid hamrohligi va tarjimonlik faoliyati"]
+      },
+      {
+        "name": "Roman-german va slavyan tillari fakulteti",
+        "directions": ["Nemis tili filologiyasi", "Fransuz tili filologiyasi", "Rus tili filologiyasi"]
+      },
+      {
+        "name": "Sharq tillari fakulteti",
+        "directions": ["Xitoy tili va adabiyoti", "Koreys tili va adabiyoti", "Arab tili va adabiyoti", "Yapon tili"]
+      },
+      {
+        "name": "Tarjimashunoslik va xalqaro munosabatlar fakulteti",
+        "directions": ["Sinxron tarjima", "Badiiy tarjima", "Xalqaro jurnalistika"]
+      }
+    ],
+    "academicSystems": {
+      "platform": "HEMIS axborot tizimi (hemis.adchti.uz)",
+      "creditSystem": "ECTS kredit-modul tizimi",
+      "grading": "GPA (Grade Point Average) baholash mezoni",
+      "library": "Axborot-resurs markazi (ARM), elektron kutubxona bazasi"
+    },
+    "studentServices": {
+      "dormitory": "Talabalar turar joyi (TTJ) - arizalar my.gov.uz yoki HEMIS orqali qabul qilinadi",
+      "tuitionContract": "Kontrakt to'lovlari semestr boshida amalga oshiriladi, tabaqalashtirilgan shartnoma (super-kontrakt) ham mavjud",
+      "scholarship": "Davlat granti va tabaqalashtirilgan stipendiyalar (a'lo, yaxshi, bazaviy) mavjud",
+      "transfer": "O'qishni ko'chirish (perevod) - faqat transfer.edu.uz rasmiy portali orqali belgilangan muddatlarda"
+    }
+  },
+  "persona": {
+    "name": "Malika",
+    "role": "ADCHTI raqamli ovozli yordamchisi",
+    "language": "uz-UZ",
+    "tone": "Samimiy, xushmuomala, akademik va yordamga shay",
+    "speechGuidelines": "Javoblar qisqa, nutqqa mos (og'zaki so'zlashuvga qulay) bo'lishi shart. Belgilar (yulduzcha, ro'yxat sonlari, qavslar) ishlatilmasin, chunki ular ovozli o'qilganda sun'iy eshitiladi."
+  }
+}

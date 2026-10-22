@@ -1,0 +1,16 @@
+ADCHTI Assistant — Rive build notes
+
+The real .riv must be exported by Rive Editor or compiled by the official Rive CLI. Do not rename a PNG/HTML file to .riv.
+
+Recommended Rive setup:
+- Artboard: ADCHTI Assistant, 640 x 640
+- Import assets/avatar-source.png as the portrait/background visual.
+- Best-quality rig: create editable/vector mouth shapes as separate layers over the mouth area, with at least closed, small-open and wide-open states; keep the portrait raster underneath.
+- State machine: AssistantState
+- Boolean input: isSpeaking
+- Optional Number input: mouthOpen in 0..1, if using script-driven mouth opening.
+- States: Idle (default), Speaking (looping gentle open/close); transition to Speaking when isSpeaking=true and back to Idle when false.
+- Add subtle idle blink/head motion only if it does not distort the baked portrait.
+- Export a web-runtime .riv file and load it using the current Rive JS runtime.
+
+The included HTML prototype already implements a small-volume-based mouth overlay for HTML audio. It is not a Rive file, and the mouth motion is intentionally simple rather than phoneme-level lip-sync.
