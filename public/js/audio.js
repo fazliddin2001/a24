@@ -1,7 +1,8 @@
 /**
  * Audio Pipeline: 16kHz PCM streaming to Gemini Live, small chunks (20-40ms),
  * client-side manual VAD with 200ms rolling pre-buffer, activityStart / activityEnd turn control,
- * gapless real-time 24kHz PCM playback scheduling, and audio-reactive 3D lip-sync.
+ * gapless real-time 24kHz PCM playback scheduling, audio-reactive 3D lip-sync,
+ * and concurrent fallback recording to ensure zero 10-minute hangs.
  */
 
 // Downsample Float32 buffer to 16,000 Hz if hardware runs at 44.1k/48k
@@ -61,6 +62,8 @@ export class AudioPipeline {
     this.mediaStream = null;
     this.micSource = null;
     this.processor = null;
+    this.mediaRecorder = null;
+    this.audioChunks = [];
     this.isRecording = false;
 
     // VAD & Streaming state
@@ -91,7 +94,6 @@ export class AudioPipeline {
     if (!this.audioContext) {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       try {
-        // Attempt native 16kHz context if supported
         this.audioContext = new AudioCtx({ sampleRate: 16000 });
       } catch (e) {
         this.audioContext = new AudioCtx();
@@ -120,9 +122,8 @@ export class AudioPipeline {
     return this.playbackCtx;
   }
 
-  // --- REALTIME STREAMING RECORDING WITH MANUAL VAD & 200MS BUFFER ---
+  // --- REALTIME STREAMING RECORDING WITH MANUAL VAD & CONCURRENT FALLBACK ---
   async startRecording(onAutoStop = null) {
-    // Interrupt any current playback before listening
     this.stopPlayback();
     await this.initAudioContext();
 
@@ -141,6 +142,22 @@ export class AudioPipeline {
       }
     });
 
+    // Start background MediaRecorder as fallback in case Live API connection drops
+    this.audioChunks = [];
+    try {
+      let mimeType = 'audio/webm;codecs=opus';
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
+      }
+      this.mediaRecorder = mimeType ? new MediaRecorder(this.mediaStream, { mimeType }) : new MediaRecorder(this.mediaStream);
+      this.mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) this.audioChunks.push(e.data);
+      };
+      this.mediaRecorder.start(100);
+    } catch (mrErr) {
+      console.warn('MediaRecorder init error:', mrErr);
+    }
+
     this.micSource = this.audioContext.createMediaStreamSource(this.mediaStream);
 
     // Analyser node for visualizer & VAD energy monitoring
@@ -149,27 +166,21 @@ export class AudioPipeline {
     micAnalyser.smoothingTimeConstant = 0.35;
     this.micSource.connect(micAnalyser);
 
-    // BufferSize 512 at 16kHz = 32ms chunks (fits exactly Google's 20-40ms recommendation)
+    // BufferSize 512 at 16kHz = 32ms chunks
     const bufferSize = 512;
     this.processor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
     this.micSource.connect(this.processor);
-    // Connect processor to destination (muted/silent) to keep Web Audio process loop active
     this.processor.connect(this.audioContext.destination);
 
     if (this.waveformBox) this.waveformBox.classList.add('active');
 
-    // VAD Timing Variables
     const recordingStartTime = Date.now();
     let speechFramesCount = 0;
     let lastVoiceTime = 0;
     let autoStopFired = false;
 
-    // Generous thresholds:
-    // 2.2 seconds of natural silence after sentence completion
     const SILENCE_LIMIT_MS = 2200;
-    // 6.0 seconds grace period at start for user to formulate their question
     const INITIAL_GRACE_PERIOD_MS = 6000;
-    // 60 seconds hard limit
     const MAX_DURATION_MS = 60000;
 
     const triggerAutoStop = (reason) => {
@@ -177,7 +188,6 @@ export class AudioPipeline {
       autoStopFired = true;
       console.log(`VAD Trigger: ${reason}`);
 
-      // Signal Gemini Live that user has finished speaking
       if (this.liveClient?.isConnected && this.hasSentActivityStart) {
         this.liveClient.sendActivityEnd();
       }
@@ -204,21 +214,19 @@ export class AudioPipeline {
       const avgEnergy = sum / (this.waveBars.length * 255);
       const now = Date.now();
 
-      // Check speech activity (above room background noise)
       if (avgEnergy > 0.08) {
         speechFramesCount++;
-        if (speechFramesCount >= 4) { // Sustained speech ~80-100ms
+        if (speechFramesCount >= 4) {
           lastVoiceTime = now;
 
           if (!this.hasSpokenSustained) {
             this.hasSpokenSustained = true;
 
-            // Trigger activityStart to Gemini Live
             if (this.liveClient?.isConnected && !this.hasSentActivityStart) {
               this.hasSentActivityStart = true;
               this.liveClient.sendActivityStart();
 
-              // Send the 200ms rolling buffer so beginning of first word is never lost
+              // Send rolling 200ms pre-buffer
               while (this.rollingPreBuffer.length > 0) {
                 const chunk = this.rollingPreBuffer.shift();
                 this.liveClient.sendAudioChunk(chunk);
@@ -230,19 +238,16 @@ export class AudioPipeline {
         speechFramesCount = Math.max(0, speechFramesCount - 1);
       }
 
-      // 1. User has spoken, and now silence has lasted >= SILENCE_LIMIT_MS -> Auto stop!
       if (this.hasSpokenSustained && lastVoiceTime > 0 && (now - lastVoiceTime >= SILENCE_LIMIT_MS)) {
         triggerAutoStop('Nutq yakunlandi va jimlik saqlandi');
         return;
       }
 
-      // 2. 6 seconds passed since mic opened without any speech -> Auto stop!
       if (!this.hasSpokenSustained && (now - recordingStartTime >= INITIAL_GRACE_PERIOD_MS)) {
         triggerAutoStop('6s davomida ovoz eshitilmadi');
         return;
       }
 
-      // 3. 1 minute maximum duration limit reached -> Auto stop!
       if (now - recordingStartTime >= MAX_DURATION_MS) {
         triggerAutoStop('1 daqiqalik maksimal vaqt yakunlandi');
         return;
@@ -251,23 +256,19 @@ export class AudioPipeline {
       requestAnimationFrame(updateWaveAndVAD);
     };
 
-    // Live PCM audio processing callback (fires every ~32ms)
     this.processor.onaudioprocess = (e) => {
       if (!this.isRecording) return;
       const rawChannel = e.inputBuffer.getChannelData(0);
 
-      // Downsample to 16,000 Hz if necessary
       const downsampled = downsampleBuffer(rawChannel, this.audioContext.sampleRate, 16000);
       const pcm16 = floatTo16BitPCM(downsampled);
       const base64Chunk = int16ToBase64(pcm16);
 
       if (this.hasSentActivityStart) {
-        // Stream live chunks as they arrive directly to Gemini Live
         if (this.liveClient?.isConnected) {
           this.liveClient.sendAudioChunk(base64Chunk);
         }
       } else {
-        // Maintain rolling ~200ms pre-buffer while waiting for speech onset
         this.rollingPreBuffer.push(base64Chunk);
         if (this.rollingPreBuffer.length > this.MAX_PRE_BUFFER_CHUNKS) {
           this.rollingPreBuffer.shift();
@@ -303,17 +304,45 @@ export class AudioPipeline {
       this.micSource = null;
     }
 
+    // Capture fallback audio blob from MediaRecorder
+    let fallbackData = null;
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      fallbackData = await new Promise((resolve) => {
+        this.mediaRecorder.onstop = () => {
+          if (this.audioChunks.length === 0) {
+            resolve(null);
+            return;
+          }
+          const blob = new Blob(this.audioChunks, { type: this.mediaRecorder.mimeType || 'audio/webm' });
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64Data = reader.result.split(',')[1];
+            resolve({
+              data: base64Data,
+              mimeType: blob.type
+            });
+          };
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(blob);
+        };
+        try {
+          this.mediaRecorder.stop();
+        } catch {
+          resolve(null);
+        }
+      });
+    }
+
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach((track) => track.stop());
       this.mediaStream = null;
     }
 
-    // If activityStart was sent, ensure activityEnd is sent to trigger Gemini response
     if (this.liveClient?.isConnected && this.hasSentActivityStart) {
       this.liveClient.sendActivityEnd();
     }
 
-    return { liveStreamed: true };
+    return fallbackData;
   }
 
   // --- REALTIME STREAMING PLAYBACK & 3D LIP-SYNC PIPELINE ---
@@ -397,7 +426,6 @@ export class AudioPipeline {
       }
       const rms = Math.sqrt(energy / samples.length);
 
-      // Reverted smooth lip-sync formula
       const mouthVal = 0.16 + Math.min(0.84, Math.max(0, rms - 0.012) * 14.5);
       this.avatar.setMouthOpen(mouthVal);
 
@@ -416,7 +444,6 @@ export class AudioPipeline {
   }
 
   stopPlayback() {
-    // Stop all active streaming live audio sources
     for (const src of this.activeLiveSources) {
       try {
         src.stop();

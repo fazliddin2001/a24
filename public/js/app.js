@@ -43,6 +43,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentAssistantBubble = null;
   let currentAssistantTextSpan = null;
   let accumulatedAssistantText = '';
+  let liveWatchdogTimer = null;
+  let hasReceivedLiveResponse = false;
+  let lastFallbackAudio = null;
 
   const updateTurnUI = () => {
     if (turnCounter) turnCounter.textContent = `${turnCount} / ${MAX_TURNS}`;
@@ -178,7 +181,19 @@ document.addEventListener('DOMContentLoaded', () => {
     avatar.setState('listening');
   };
 
+  liveClient.onError = (err) => {
+    console.error('Gemini Live error:', err);
+    clearTimeout(liveWatchdogTimer);
+    if (!hasReceivedLiveResponse && avatar.state === 'thinking' && lastFallbackAudio) {
+      console.warn('⚠️ Live xatosi yuz berdi. Avtomatik /api/chat ga o\'tilmoqda...');
+      submitQuery({ audioData: lastFallbackAudio });
+    }
+  };
+
   liveClient.onTextPart = (chunk) => {
+    clearTimeout(liveWatchdogTimer);
+    hasReceivedLiveResponse = true;
+
     if (!currentAssistantBubble) {
       createStreamingAssistantBubble();
     }
@@ -190,11 +205,16 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   liveClient.onAudioChunk = (base64Data, mimeType) => {
+    clearTimeout(liveWatchdogTimer);
+    hasReceivedLiveResponse = true;
+
     // Instant streaming audio chunk playback with zero gap
     audio.queueLiveAudioChunk(base64Data, mimeType);
   };
 
   liveClient.onTurnComplete = () => {
+    clearTimeout(liveWatchdogTimer);
+    hasReceivedLiveResponse = true;
     audio.markLiveTurnComplete();
 
     if (accumulatedAssistantText) {
@@ -235,6 +255,8 @@ document.addEventListener('DOMContentLoaded', () => {
       currentAssistantBubble = null;
       currentAssistantTextSpan = null;
       accumulatedAssistantText = '';
+      hasReceivedLiveResponse = false;
+      clearTimeout(liveWatchdogTimer);
 
       // Ensure live WebSocket connection is open
       if (!liveClient.isConnected) {
@@ -263,11 +285,33 @@ document.addEventListener('DOMContentLoaded', () => {
     avatar.setState('thinking');
     appendMessage('user', '🎙 Ovozli savol berildi...');
 
-    const result = await audio.stopRecording();
+    lastFallbackAudio = await audio.stopRecording();
 
-    // If liveClient was not connected, fallback to traditional POST /api/chat
-    if (!liveClient.isConnected && result && !result.liveStreamed) {
-      submitQuery({ audioData: result });
+    clearTimeout(liveWatchdogTimer);
+    hasReceivedLiveResponse = false;
+
+    if (liveClient.isConnected) {
+      // 4.5s watchdog timeout: If Gemini Live doesn't begin streaming within 4.5s,
+      // fall back to standard /api/chat so the assistant NEVER hangs in "thinking" mode!
+      liveWatchdogTimer = setTimeout(() => {
+        if (!hasReceivedLiveResponse && avatar.state === 'thinking') {
+          console.warn('⚠️ Gemini Live javob bermadi (4.5s timeout). /api/chat ga o\'tilmoqda...');
+          if (lastFallbackAudio) {
+            submitQuery({ audioData: lastFallbackAudio });
+          } else {
+            avatar.setState('idle');
+            wakeWord.resume();
+          }
+        }
+      }, 4500);
+    } else {
+      // Live client not connected, immediate /api/chat fallback
+      if (lastFallbackAudio) {
+        submitQuery({ audioData: lastFallbackAudio });
+      } else {
+        avatar.setState('idle');
+        wakeWord.resume();
+      }
     }
   }
 

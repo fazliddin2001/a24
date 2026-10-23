@@ -281,6 +281,21 @@ export default {
         });
       }
 
+      // === LIST MODELS ENDPOINT ===
+      if (url.pathname === '/api/list-models') {
+        const apiKey = env.GEMINI_API_KEY;
+        if (!apiKey) {
+          return new Response(JSON.stringify({ error: 'GEMINI_API_KEY topilmadi' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+        }
+        try {
+          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+          const data = await res.json();
+          return new Response(JSON.stringify(data, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        } catch (e) {
+          return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+        }
+      }
+
       // === AUTH: Login ===
       if (url.pathname === '/api/auth/login' && request.method === 'POST') {
         return handleLogin(request, env);
@@ -653,6 +668,7 @@ async function handleLiveConfig(request, env) {
       model: liveModel,
       voice: voice,
       apiKey: apiKey,
+      token: env.CF_AIG_TOKEN || '',
       systemInstruction: systemPrompt,
       gatewayUrl: (accountId && gatewayName && apiKey)
         ? `wss://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayName}/google?api_key=${apiKey}`
@@ -688,8 +704,15 @@ async function handleLiveWebSocket(request, env) {
   const liveModel = env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
   const voice = env.GEMINI_VOICE || 'Aoede';
 
-  // Target Google Gemini Live WebSocket endpoint
-  const targetUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+  // Target Cloudflare AI Gateway (or Google directly as fallback)
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+  const gatewayName = env.AI_GATEWAY_NAME;
+  let targetUrl;
+  if (accountId && gatewayName) {
+    targetUrl = `wss://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayName}/google?api_key=${apiKey}`;
+  } else {
+    targetUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+  }
 
   let geminiResp;
   try {
