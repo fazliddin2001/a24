@@ -126,8 +126,8 @@ export class GeminiLiveClient {
         resolve(socket);
       };
 
-      socket.onmessage = (event) => {
-        this.handleMessage(event.data);
+      socket.onmessage = async (event) => {
+        await this.handleMessage(event.data);
       };
 
       socket.onerror = (err) => {
@@ -158,7 +158,7 @@ export class GeminiLiveClient {
       setup: {
         model: modelName,
         generationConfig: {
-          responseModalities: ["AUDIO", "TEXT"],
+          responseModalities: ["AUDIO"],
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: {
@@ -231,9 +231,17 @@ export class GeminiLiveClient {
     this.ws.send(JSON.stringify(msg));
   }
 
-  handleMessage(raw) {
+  async handleMessage(raw) {
     try {
-      const data = JSON.parse(raw);
+      let text;
+      if (raw instanceof Blob) {
+        text = await raw.text();
+      } else if (typeof raw === 'string') {
+        text = raw;
+      } else {
+        text = new TextDecoder().decode(raw);
+      }
+      const data = JSON.parse(text);
 
       // Check for Gemini API errors
       if (data.error) {

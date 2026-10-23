@@ -741,7 +741,7 @@ async function handleLiveWebSocket(request, env) {
     setup: {
       model: liveModel.startsWith('models/') ? liveModel : `models/${liveModel}`,
       generationConfig: {
-        responseModalities: ["AUDIO", "TEXT"],
+        responseModalities: ["AUDIO"],
         speechConfig: {
           voiceConfig: {
             prebuiltVoiceConfig: {

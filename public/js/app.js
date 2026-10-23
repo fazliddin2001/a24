@@ -208,6 +208,13 @@ document.addEventListener('DOMContentLoaded', () => {
     clearTimeout(liveWatchdogTimer);
     hasReceivedLiveResponse = true;
 
+    if (!currentAssistantBubble) {
+      createStreamingAssistantBubble();
+      if (currentAssistantTextSpan) {
+        currentAssistantTextSpan.textContent = '🔊 Ovozli javob tinglanmoqda...';
+      }
+    }
+
     // Instant streaming audio chunk playback with zero gap
     audio.queueLiveAudioChunk(base64Data, mimeType);
   };
@@ -217,23 +224,25 @@ document.addEventListener('DOMContentLoaded', () => {
     hasReceivedLiveResponse = true;
     audio.markLiveTurnComplete();
 
-    if (accumulatedAssistantText) {
-      conversationHistory.push({
-        role: 'user',
-        parts: [{ text: 'Foydalanuvchi savol berdi' }]
-      });
-      conversationHistory.push({
-        role: 'model',
-        parts: [{ text: accumulatedAssistantText }]
-      });
-      turnCount++;
-      updateTurnUI();
+    if (!accumulatedAssistantText && currentAssistantTextSpan) {
+      currentAssistantTextSpan.textContent = '🔊 Ovozli javob berildi.';
+    }
 
-      if (turnCount > MAX_TURNS) {
-        setTimeout(() => {
-          resetConversation(true);
-        }, 3000);
-      }
+    conversationHistory.push({
+      role: 'user',
+      parts: [{ text: 'Foydalanuvchi ovozli savol berdi' }]
+    });
+    conversationHistory.push({
+      role: 'model',
+      parts: [{ text: accumulatedAssistantText || 'Ovozli javob berildi' }]
+    });
+    turnCount++;
+    updateTurnUI();
+
+    if (turnCount > MAX_TURNS) {
+      setTimeout(() => {
+        resetConversation(true);
+      }, 3000);
     }
   };
 
