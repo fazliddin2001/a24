@@ -1,6 +1,6 @@
 /**
  * Audio Pipeline: Microphone recording, base64 encoding, audio-reactive playback,
- * and Voice Activity Detection (VAD) with silence auto-stop & 1-min cap
+ * and robust Voice Activity Detection (VAD) with initial grace period & 1-min cap
  */
 export class AudioPipeline {
   constructor(avatarController, waveformBox) {
@@ -15,6 +15,7 @@ export class AudioPipeline {
     this.currentSource = null;
     this.currentAudioElement = null;
     this.autoStopCallback = null;
+    this.onPlaybackEnded = null;
 
     this.waveBars = waveformBox ? Array.from(waveformBox.querySelectorAll('.wave-bar')) : [];
   }
@@ -30,7 +31,7 @@ export class AudioPipeline {
     return this.audioContext;
   }
 
-  // --- RECORDING PIPELINE WITH VAD & 1-MINUTE TIMEOUT ---
+  // --- RECORDING PIPELINE WITH ROBUST VAD & 1-MINUTE TIMEOUT ---
   /**
    * Starts recording from microphone.
    * @param {Function} onAutoStop - Called when user stops speaking (silence detected) or 1 minute elapses.
@@ -49,7 +50,6 @@ export class AudioPipeline {
       }
     });
 
-    // Check supported MIME type
     let mimeType = 'audio/webm;codecs=opus';
     if (!MediaRecorder.isTypeSupported(mimeType)) {
       if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
@@ -62,23 +62,32 @@ export class AudioPipeline {
     const micSource = this.audioContext.createMediaStreamSource(stream);
     const micAnalyser = this.audioContext.createAnalyser();
     micAnalyser.fftSize = 128;
-    micAnalyser.smoothingTimeConstant = 0.5;
+    micAnalyser.smoothingTimeConstant = 0.4;
     micSource.connect(micAnalyser);
 
     const freqData = new Uint8Array(micAnalyser.frequencyBinCount);
     if (this.waveformBox) this.waveformBox.classList.add('active');
 
-    // VAD state variables
-    let hasSpoken = false;
-    let lastVoiceTime = 0;
+    // VAD state variables:
     const recordingStartTime = Date.now();
-    const SILENCE_LIMIT_MS = 1800; // 1.8 seconds of silence to auto-stop after speech
-    const MAX_DURATION_MS = 60000; // 1 minute maximum duration limit
+    let speechFramesCount = 0;
+    let hasSpokenSustained = false; // User has actually spoken a sentence
+    let lastVoiceTime = 0;
+
+    // Generous thresholds to prevent false cut-offs:
+    // 2.8 seconds of natural silence after sentence completion
+    const SILENCE_LIMIT_MS = 2800;
+    // 6.0 seconds grace period at start for user to formulate their question
+    const INITIAL_GRACE_PERIOD_MS = 6000;
+    // 60 seconds (1 minute) hard maximum
+    const MAX_DURATION_MS = 60000;
+
     let autoStopFired = false;
 
-    const triggerAutoStop = () => {
+    const triggerAutoStop = (reason) => {
       if (autoStopFired || !this.isRecording) return;
       autoStopFired = true;
+      console.log(`VAD Trigger: ${reason}`);
       if (this.autoStopCallback) {
         this.autoStopCallback();
       }
@@ -99,23 +108,32 @@ export class AudioPipeline {
       const avgEnergy = sum / (this.waveBars.length * 255);
       const now = Date.now();
 
-      // Check speech activity (voice energy above ambient noise threshold)
+      // Check speech activity (above room background noise)
       if (avgEnergy > 0.08) {
-        hasSpoken = true;
-        lastVoiceTime = now;
+        speechFramesCount++;
+        if (speechFramesCount >= 5) { // Sustained speech ~100ms
+          hasSpokenSustained = true;
+          lastVoiceTime = now;
+        }
+      } else {
+        speechFramesCount = Math.max(0, speechFramesCount - 1);
       }
 
-      // 1. If user spoke and has now been silent for 1.8 seconds -> Auto-stop!
-      if (hasSpoken && lastVoiceTime > 0 && (now - lastVoiceTime >= SILENCE_LIMIT_MS)) {
-        console.log('VAD: Jimlik aniqlandi (1.8s silence) -> yozish avtomatik toxtatildi');
-        triggerAutoStop();
+      // 1. User has spoken, and now silence has lasted >= 2.8 seconds -> Auto stop!
+      if (hasSpokenSustained && lastVoiceTime > 0 && (now - lastVoiceTime >= SILENCE_LIMIT_MS)) {
+        triggerAutoStop('Nutq yakunlandi va 2.8s jimlik saqlandi');
         return;
       }
 
-      // 2. Or until 1 minute (60 seconds) whichever comes first!
+      // 2. 6 seconds passed since mic opened without any speech -> Auto stop!
+      if (!hasSpokenSustained && (now - recordingStartTime >= INITIAL_GRACE_PERIOD_MS)) {
+        triggerAutoStop('6s davomida hech qanday ovoz aytilmadi');
+        return;
+      }
+
+      // 3. 1 minute maximum duration limit reached -> Auto stop!
       if (now - recordingStartTime >= MAX_DURATION_MS) {
-        console.log('VAD: 1 daqiqalik maksimal vaqt chegarasi -> yozish avtomatik toxtatildi');
-        triggerAutoStop();
+        triggerAutoStop('1 daqiqalik maksimal vaqt chegarasiga yetildi');
         return;
       }
 
@@ -169,7 +187,7 @@ export class AudioPipeline {
     });
   }
 
-  // --- PLAYBACK & SILKY SMOOTH LIP-SYNC PIPELINE ---
+  // --- PLAYBACK & RESTORED LIP-SYNC PIPELINE ---
   stopPlayback() {
     if (this.currentAudioElement) {
       this.currentAudioElement.pause();
@@ -229,10 +247,9 @@ export class AudioPipeline {
     const source = this.audioContext.createBufferSource();
     source.buffer = buffer;
 
-    // Analyser setup with Web Audio smoothing filter
     const analyser = this.audioContext.createAnalyser();
-    analyser.fftSize = 512;
-    analyser.smoothingTimeConstant = 0.75; // Smooth exponential moving average
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.65;
 
     source.connect(analyser);
     analyser.connect(this.audioContext.destination);
@@ -240,27 +257,20 @@ export class AudioPipeline {
     this.currentSource = source;
     this.avatar.setState('speaking');
 
-    const freqData = new Uint8Array(analyser.frequencyBinCount);
-    const sampleRate = this.audioContext.sampleRate || 44100;
-    const binSize = sampleRate / analyser.fftSize;
-
-    // Human speech formant frequency band: ~250 Hz to ~3200 Hz
-    const minBin = Math.max(1, Math.floor(250 / binSize));
-    const maxBin = Math.min(analyser.frequencyBinCount - 1, Math.ceil(3200 / binSize));
+    const samples = new Uint8Array(analyser.fftSize);
 
     const monitorLipSync = () => {
-      analyser.getByteFrequencyData(freqData);
-
-      let voiceEnergySum = 0;
-      let count = 0;
-      for (let i = minBin; i <= maxBin; i++) {
-        voiceEnergySum += freqData[i];
-        count++;
+      analyser.getByteTimeDomainData(samples);
+      let energy = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const norm = (samples[i] - 128) / 128;
+        energy += norm * norm;
       }
-      const avgEnergy = count > 0 ? (voiceEnergySum / (count * 255)) : 0;
+      const rms = Math.sqrt(energy / samples.length);
 
-      // Feed smoothed vocal formant energy to 3D avatar
-      this.avatar.setMouthOpen(avgEnergy);
+      // Map RMS volume directly to mouth openness (reverted to original working logic)
+      const mouthVal = 0.16 + Math.min(0.84, Math.max(0, rms - 0.012) * 14.5);
+      this.avatar.setMouthOpen(mouthVal);
 
       this.animFrame = requestAnimationFrame(monitorLipSync);
     };
@@ -269,7 +279,7 @@ export class AudioPipeline {
       if (this.animFrame) cancelAnimationFrame(this.animFrame);
       this.animFrame = null;
       this.avatar.setState('idle');
-      this.avatar.setMouthOpen(0.0);
+      this.avatar.setMouthOpen(0.16);
       if (this.onPlaybackEnded) this.onPlaybackEnded();
     };
 

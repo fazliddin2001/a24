@@ -1,9 +1,10 @@
 /**
  * Wake Word Listener ("Malika")
- * Lightweight client-side wake word detector using Web Speech API
- * - Passively listens in background for "Malika"
- * - Automatically triggers microphone recording when heard
- * - Pauses during active recording and TTS speech to prevent feedback loops
+ * High-sensitivity client-side wake word detector using Web Speech API
+ * - Passively and continuously listens for "Malika"
+ * - Instant single-attempt trigger across alternative transcriptions
+ * - Automatic robust reconnection with zero dead-time
+ * - Pauses during active recording and TTS playback to prevent feedback loops
  */
 export class WakeWordListener {
   constructor(onWakeCallback, onStatusChangeCallback = null) {
@@ -12,10 +13,17 @@ export class WakeWordListener {
     this.recognition = null;
     this.isActive = false;
     this.isPaused = false;
+    this.isListening = false;
     this.isSupported = false;
+    this.restartTimer = null;
 
-    // Wake keywords (Uzbek, phonetic variations, and Cyrillic)
-    this.keywords = ['malika', 'malik', 'малика', 'malikam', 'ey malika', 'hey malika', 'molika'];
+    // Comprehensive phonetic variations of "Malika" in Uzbek (Latin & Cyrillic)
+    this.patterns = [
+      'malika', 'malik', 'malikam', 'malikaxon', 'malikaa', 'alika',
+      'molika', 'melika', 'marika', 'malka', 'manika',
+      'малика', 'малик', 'молика', 'мэлика', 'маликам'
+    ];
+    this.regex = /\b(m[a-z]{0,2}lik[a-z]*|marika|molika|malka|малик[а-я]*)\b/i;
 
     this.initRecognition();
   }
@@ -23,7 +31,7 @@ export class WakeWordListener {
   initRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      console.warn('Web Speech API (SpeechRecognition) bu brauzerda qo\'llab-quvvatlanmaydi.');
+      console.warn('Web Speech API bu brauzerda mavjud emas.');
       this.isSupported = false;
       if (this.onStatusChange) this.onStatusChange(false, 'unsupported');
       return;
@@ -37,44 +45,49 @@ export class WakeWordListener {
       this.recognition.lang = 'uz-UZ';
       this.recognition.maxAlternatives = 3;
 
+      this.recognition.onstart = () => {
+        this.isListening = true;
+        if (this.onStatusChange) this.onStatusChange(true, 'listening');
+      };
+
       this.recognition.onresult = (event) => {
         if (this.isPaused) return;
 
         for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript.toLowerCase().trim();
-          console.log('[WakeWord Check]:', transcript);
+          const res = event.results[i];
+          // Check top alternatives for maximum recognition accuracy on first try
+          for (let j = 0; j < res.length; j++) {
+            const transcript = res[j].transcript.toLowerCase().trim();
 
-          const matched = this.keywords.some((kw) => transcript.includes(kw));
-          if (matched) {
-            console.log('⚡ Wake word "Malika" aniqlandi! Mikrofon faollashtirilmoqda...');
-            this.pause(); // Pause wake-word listening while user records/interacts
-            if (this.onWake) {
-              this.onWake(transcript);
+            if (this.matchesWakeWord(transcript)) {
+              console.log('⚡ "Malika" aniqlandi:', transcript);
+              this.pause(); // Pause immediately so it does not conflict with mic recording
+              if (this.onWake) {
+                this.onWake(transcript);
+              }
+              return;
             }
-            break;
           }
         }
       };
 
       this.recognition.onerror = (event) => {
-        // 'no-speech' or 'aborted' are normal lifecycle events
-        if (event.error !== 'no-speech' && event.error !== 'aborted') {
-          console.warn('WakeWord error:', event.error);
+        // 'no-speech' and 'aborted' are normal lifecycle events
+        if (event.error === 'not-allowed') {
+          console.warn('Mikrofon ruxsati berilmadi (WakeWord to\'xtatildi).');
+          this.isActive = false;
+          if (this.onStatusChange) this.onStatusChange(false, 'denied');
+        } else {
+          // Immediately schedule restart for transient errors
+          this.scheduleRestart(40);
         }
       };
 
       this.recognition.onend = () => {
-        // Continuous listener auto-reconnect if not explicitly paused or stopped
+        this.isListening = false;
+        // Keep listening continuously: auto-restart with minimal delay
         if (this.isActive && !this.isPaused) {
-          setTimeout(() => {
-            if (this.isActive && !this.isPaused) {
-              try {
-                this.recognition.start();
-              } catch (e) {
-                // Ignore if already active
-              }
-            }
-          }, 300);
+          this.scheduleRestart(30);
         }
       };
     } catch (err) {
@@ -83,52 +96,70 @@ export class WakeWordListener {
     }
   }
 
+  matchesWakeWord(text) {
+    if (!text) return false;
+    if (this.patterns.some((p) => text.includes(p))) return true;
+    return this.regex.test(text);
+  }
+
+  scheduleRestart(delay = 50) {
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = setTimeout(() => {
+      if (this.isActive && !this.isPaused && !this.isListening) {
+        try {
+          this.recognition.start();
+          this.isListening = true;
+        } catch (e) {
+          // If already starting or engine busy, retry shortly
+          this.scheduleRestart(150);
+        }
+      }
+    }, delay);
+  }
+
   start() {
     if (!this.isSupported || !this.recognition) return false;
     this.isActive = true;
     this.isPaused = false;
     try {
       this.recognition.start();
+      this.isListening = true;
       if (this.onStatusChange) this.onStatusChange(true, 'listening');
       return true;
     } catch (err) {
-      // Already running
-      if (this.onStatusChange) this.onStatusChange(true, 'listening');
+      this.scheduleRestart(100);
       return true;
     }
   }
 
   pause() {
     this.isPaused = true;
-    if (this.recognition) {
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    if (this.recognition && this.isListening) {
       try {
         this.recognition.stop();
       } catch (err) {}
     }
+    this.isListening = false;
     if (this.onStatusChange) this.onStatusChange(false, 'paused');
   }
 
   resume() {
     if (!this.isActive || !this.isSupported) return;
     this.isPaused = false;
-    setTimeout(() => {
-      if (this.isActive && !this.isPaused) {
-        try {
-          this.recognition.start();
-          if (this.onStatusChange) this.onStatusChange(true, 'listening');
-        } catch (err) {}
-      }
-    }, 400);
+    this.scheduleRestart(100);
   }
 
   stop() {
     this.isActive = false;
     this.isPaused = false;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
     if (this.recognition) {
       try {
         this.recognition.stop();
       } catch (err) {}
     }
+    this.isListening = false;
     if (this.onStatusChange) this.onStatusChange(false, 'stopped');
   }
 

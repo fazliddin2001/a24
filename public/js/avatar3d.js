@@ -8,7 +8,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
  * - Draggable movement around the page with dock reset
  * - Enhanced 3D perspective & head movement with cursor parallax
  * - Natural idle eye blinking (~every 3.5-5.5s)
- * - Smooth biological lip-sync with attack/release envelope & cadence
+ * - Restored audio-reactive mouth overlay speaking animation
  * - Strict overlay visibility handling (object.visible = false AND ShowOverlay shape key = 0)
  * - State management (idle, listening, thinking, speaking)
  * - Removal of Blender default Cube
@@ -37,10 +37,6 @@ export class Avatar3DController {
     this.pulseStart = 0;
     this.pulseEnd = 0;
     this.isLoaded = false;
-
-    // Smooth Lip Articulation Envelope
-    this.targetMouthOpen = 0.0;
-    this.currentMouthOpen = 0.0;
 
     // Three.js Core
     this.scene = null;
@@ -307,27 +303,25 @@ export class Avatar3DController {
     }, 140);
   }
 
-  // --- MOUTH OPENING / AUDIO LIP-SYNC ---
-  /**
-   * Sets the target vocal energy.
-   * Instead of abruptly turning overlays on/off, values are filtered through
-   * an organic attack/release envelope in the 60 FPS animation loop.
-   */
+  // --- RESTORED MOUTH OPENING / AUDIO LIP-SYNC ---
   setMouthOpen(value) {
+    if (!this.ovrMouthWide || !this.isLoaded) return;
+
+    // Only allow mouth opening when actively speaking
     if (this.state !== 'speaking') {
-      this.targetMouthOpen = 0.0;
+      this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
       return;
     }
 
     const v = Number(value) || 0.0;
 
-    // Vocal noise floor filter
-    if (v < 0.10) {
-      this.targetMouthOpen = 0.0;
+    // Audio threshold: if sound drops (pause between words/syllables), close immediately
+    if (v < 0.22) {
+      this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
     } else {
-      // Map voice energy to smooth opening intensity with natural power response
-      const normalized = Math.min(1.0, (v - 0.10) / 0.45);
-      this.targetMouthOpen = Math.pow(normalized, 0.85);
+      // Map audio energy to mouth shape key intensity
+      const weight = Math.min(1.0, Math.max(0.4, (v - 0.2) * 1.5));
+      this.setOverlayVisible(this.ovrMouthWide, true, weight);
     }
   }
 
@@ -349,8 +343,6 @@ export class Avatar3DController {
 
       // Listening / recording: Keep mouth closed and disable blinking
       this.isBlinking = false;
-      this.targetMouthOpen = 0.0;
-      this.currentMouthOpen = 0.0;
       this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
       this.setOverlayVisible(this.ovrEyesClosed, false, 0.0);
     } else if (state === 'thinking') {
@@ -360,8 +352,6 @@ export class Avatar3DController {
 
       // Thinking: Hide mouth overlays and disable blinking
       this.isBlinking = false;
-      this.targetMouthOpen = 0.0;
-      this.currentMouthOpen = 0.0;
       this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
       this.setOverlayVisible(this.ovrEyesClosed, false, 0.0);
     } else if (state === 'speaking') {
@@ -375,8 +365,6 @@ export class Avatar3DController {
       // Idle: Ready, enable blinking, mouth strictly closed
       this.updateStatus('Tayyor (Ready)', '#10b981');
       this.stopPulse();
-      this.targetMouthOpen = 0.0;
-      this.currentMouthOpen = 0.0;
       this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
       this.setOverlayVisible(this.ovrEyesClosed, false, 0.0);
     }
@@ -403,7 +391,7 @@ export class Avatar3DController {
       const t = (now - this.pulseStart) / 1000;
       // Syllable oscillation rhythm
       const syllable = Math.sin(t * 11.2) * 0.5 + Math.sin(t * 5.6 + 0.8) * 0.3 + 0.2;
-      this.setMouthOpen(0.12 + Math.max(0, syllable * 0.55));
+      this.setMouthOpen(0.16 + Math.max(0, syllable * 0.7));
       this.pulseRaf = requestAnimationFrame(loop);
     };
 
@@ -416,8 +404,6 @@ export class Avatar3DController {
       this.pulseRaf = null;
     }
     this.pulseEnd = 0;
-    this.targetMouthOpen = 0.0;
-    this.currentMouthOpen = 0.0;
     this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
   }
 
@@ -573,37 +559,6 @@ export class Avatar3DController {
           3.8 + this.mouseCurrent.y * 1.0,
           3.2
         );
-      }
-    }
-
-    // --- SMOOTH MOUTH MOVEMENT & CADENCE ---
-    if (this.ovrMouthWide && this.isLoaded) {
-      if (this.state === 'speaking') {
-        const target = this.targetMouthOpen;
-        // Asymmetric filter: fast opening attack (0.28), smooth closing decay (0.15)
-        const rate = target > this.currentMouthOpen ? 0.28 : 0.15;
-        this.currentMouthOpen += (target - this.currentMouthOpen) * rate;
-
-        // Organic syllable micro-modulation for human speech articulation
-        let mouthWeight = this.currentMouthOpen;
-        if (this.currentMouthOpen > 0.06) {
-          // Natural 4.2Hz speech cadence rhythm
-          const cadence = Math.sin(elapsedTime * 24.0) * 0.10 + Math.sin(elapsedTime * 12.0) * 0.05;
-          mouthWeight = Math.max(0.0, Math.min(1.0, this.currentMouthOpen + cadence));
-        }
-
-        // Hysteresis threshold to prevent flickering
-        if (mouthWeight > 0.025) {
-          this.setOverlayVisible(this.ovrMouthWide, true, mouthWeight);
-        } else {
-          this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
-        }
-      } else {
-        if (this.currentMouthOpen > 0.005) {
-          this.currentMouthOpen = 0.0;
-          this.targetMouthOpen = 0.0;
-          this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
-        }
       }
     }
 
