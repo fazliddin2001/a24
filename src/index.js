@@ -393,6 +393,23 @@ export default {
         }
       }
 
+      // High-speed compressed 3D model delivery (.glb.gz)
+      if (url.pathname.endsWith('.glb')) {
+        const acceptEncoding = request.headers.get('accept-encoding') || '';
+        if (acceptEncoding.includes('gzip')) {
+          const gzReq = new Request(new URL(url.pathname + '.gz', request.url), request);
+          const gzRes = await env.ASSETS.fetch(gzReq);
+          if (gzRes.ok) {
+            const headers = new Headers(gzRes.headers);
+            headers.set('Content-Type', 'model/gltf-binary');
+            headers.set('Content-Encoding', 'gzip');
+            headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+            headers.set('x-decompressed-content-length', '7903004');
+            return new Response(gzRes.body, { status: 200, headers });
+          }
+        }
+      }
+
       const res = await env.ASSETS.fetch(request);
 
       // Fast caching for 3D model (.glb) and media assets (1 year immutable)

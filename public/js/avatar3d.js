@@ -163,7 +163,7 @@ export class Avatar3DController {
 
   async loadModel(url) {
     const loader = new GLTFLoader();
-    const CACHE_NAME = 'a24-avatar-cache-v1';
+    const CACHE_NAME = 'a24-avatar-cache-v2';
 
     try {
       let arrayBuffer = null;
@@ -191,8 +191,9 @@ export class Avatar3DController {
         const response = await fetch(url);
         if (!response.ok) throw new Error(`HTTP xatosi: ${response.status}`);
 
+        const decompressedLength = response.headers.get('x-decompressed-content-length');
         const contentLength = response.headers.get('content-length');
-        const total = contentLength ? parseInt(contentLength, 10) : 11005540;
+        const total = decompressedLength ? parseInt(decompressedLength, 10) : (contentLength ? parseInt(contentLength, 10) : 7903004);
 
         const reader = response.body.getReader();
         let loaded = 0;
@@ -208,6 +209,11 @@ export class Avatar3DController {
             const txt = this.loaderEl.querySelector('.loader-text');
             if (txt) txt.textContent = `3D Model yuklanmoqda... ${percent}%`;
           }
+        }
+
+        if (this.loaderEl) {
+          const txt = this.loaderEl.querySelector('.loader-text');
+          if (txt) txt.textContent = `3D Model yuklanmoqda... 100%`;
         }
 
         const combined = new Uint8Array(loaded);
