@@ -111,19 +111,19 @@ export class AdminPanelController {
 
   async open() {
     if (!this.modal) return;
-    this.modal.style.display = 'flex';
+    this.modal.classList.add('active');
     this.switchTab('visual');
     await this.fetchInstituteData();
   }
 
   close() {
-    if (this.modal) this.modal.style.display = 'none';
+    if (this.modal) this.modal.classList.remove('active');
     this.closePassPrompt();
   }
 
   openPassPrompt() {
     if (this.passModal) {
-      this.passModal.style.display = 'flex';
+      this.passModal.classList.add('active');
       if (this.passInput) {
         this.passInput.value = '';
         setTimeout(() => this.passInput.focus(), 100);
@@ -133,7 +133,7 @@ export class AdminPanelController {
   }
 
   closePassPrompt() {
-    if (this.passModal) this.passModal.style.display = 'none';
+    if (this.passModal) this.passModal.classList.remove('active');
   }
 
   switchTab(tab) {
