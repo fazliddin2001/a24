@@ -87,7 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // UI Helpers
-  function appendMessage(role, text, thought = null, audioBase64 = null) {
+  function appendMessage(role, text, thought = null, audioDataOrBlob = null, audioMimeType = null) {
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${role}`;
 
@@ -116,13 +116,17 @@ document.addEventListener('DOMContentLoaded', () => {
     textSpan.textContent = text;
     bubble.appendChild(textSpan);
 
-    if (role === 'assistant' && audioBase64) {
+    if (audioDataOrBlob) {
       const replayBtn = document.createElement('button');
       replayBtn.className = 'message-audio-btn';
-      replayBtn.innerHTML = '▶ Qayta tinglash';
+      replayBtn.innerHTML = role === 'user' ? '▶ Savolni tinglash' : '▶ Qayta tinglash';
       replayBtn.addEventListener('click', () => {
         wakeWord.pause();
-        audio.playBase64Audio(audioBase64);
+        if (audioDataOrBlob instanceof Blob) {
+          audio.playAudioBlob(audioDataOrBlob);
+        } else {
+          audio.playBase64Audio(audioDataOrBlob, audioMimeType || (role === 'user' ? 'audio/webm' : 'audio/mp3'));
+        }
       });
       bubble.appendChild(replayBtn);
     }
@@ -251,6 +255,21 @@ document.addEventListener('DOMContentLoaded', () => {
     wakeWord.resume();
   };
 
+  // Attach audio replay button when complete assistant speech is assembled
+  audio.onTurnAudioReady = (wavBlob) => {
+    if (currentAssistantBubble && !currentAssistantBubble.querySelector('.message-audio-btn')) {
+      const replayBtn = document.createElement('button');
+      replayBtn.className = 'message-audio-btn';
+      replayBtn.innerHTML = '▶ Qayta tinglash';
+      replayBtn.addEventListener('click', () => {
+        wakeWord.pause();
+        audio.playAudioBlob(wavBlob);
+      });
+      currentAssistantBubble.appendChild(replayBtn);
+      chatHistory.scrollTop = chatHistory.scrollHeight;
+    }
+  };
+
   // --- RECORDING WORKFLOW WITH LOW-LATENCY REALTIME STREAMING ---
   async function startRecordingFlow() {
     if (isRecording) return;
@@ -292,9 +311,11 @@ document.addEventListener('DOMContentLoaded', () => {
     micBtn.innerHTML = '🎙';
 
     avatar.setState('thinking');
-    appendMessage('user', '🎙 Ovozli savol berildi...');
 
     lastFallbackAudio = await audio.stopRecording();
+    const userAudioBlob = audio.lastUserAudioBlob || lastFallbackAudio?.blob;
+
+    appendMessage('user', '🎙 Ovozli savol berildi...', null, userAudioBlob || lastFallbackAudio?.data, lastFallbackAudio?.mimeType);
 
     clearTimeout(liveWatchdogTimer);
     hasReceivedLiveResponse = false;

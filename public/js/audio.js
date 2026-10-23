@@ -1,9 +1,36 @@
 /**
  * Audio Pipeline: 16kHz PCM streaming to Gemini Live, small chunks (20-40ms),
- * client-side manual VAD with 200ms rolling pre-buffer, activityStart / activityEnd turn control,
- * gapless real-time 24kHz PCM playback scheduling, audio-reactive 3D lip-sync,
- * and concurrent fallback recording to ensure zero 10-minute hangs.
+ * client-side manual VAD with 800ms rolling pre-buffer (ensures no clipped initial syllables),
+ * instant sample-level speech onset detection, gapless real-time 24kHz PCM playback scheduling,
+ * audio-reactive 3D lip-sync, and full conversation audio recording for user & assistant replay.
  */
+
+// Convert 16-bit PCM buffer to standard canonical WAV Blob (supports 16kHz or 24kHz)
+export function pcm16ToWavBlob(uint8Bytes, sampleRate = 24000, numChannels = 1) {
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const totalDataLen = uint8Bytes.length;
+
+  // 'RIFF' chunk descriptor
+  view.setUint8(0, 0x52); view.setUint8(1, 0x49); view.setUint8(2, 0x46); view.setUint8(3, 0x46);
+  view.setUint32(4, 36 + totalDataLen, true);
+  // 'WAVE' format
+  view.setUint8(8, 0x57); view.setUint8(9, 0x41); view.setUint8(10, 0x56); view.setUint8(11, 0x45);
+  // 'fmt ' subchunk
+  view.setUint8(12, 0x66); view.setUint8(13, 0x6d); view.setUint8(14, 0x74); view.setUint8(15, 0x20);
+  view.setUint32(16, 16, true); // 16 for PCM
+  view.setUint16(20, 1, true); // Linear PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * 2, true); // Byte rate
+  view.setUint16(32, numChannels * 2, true); // Block align
+  view.setUint16(34, 16, true); // 16-bit
+  // 'data' subchunk
+  view.setUint8(36, 0x64); view.setUint8(37, 0x61); view.setUint8(38, 0x74); view.setUint8(39, 0x61);
+  view.setUint32(40, totalDataLen, true);
+
+  return new Blob([header, uint8Bytes], { type: 'audio/wav' });
+}
 
 // Downsample Float32 buffer to 16,000 Hz if hardware runs at 44.1k/48k
 function downsampleBuffer(buffer, inSampleRate, outSampleRate = 16000) {
@@ -66,13 +93,20 @@ export class AudioPipeline {
     this.audioChunks = [];
     this.isRecording = false;
 
-    // VAD & Streaming state
+    // VAD & Rolling Pre-Buffer State
     this.hasSpokenSustained = false;
     this.hasSentActivityStart = false;
-    this.rollingPreBuffer = []; // ~200ms rolling buffer before speech onset
-    this.MAX_PRE_BUFFER_CHUNKS = 7; // 7 * 32ms ≈ 224ms
+    this.rollingPreBuffer = [];
+    // 26 chunks * 32ms ≈ 832ms rolling buffer (preserves entire first word)
+    this.MAX_PRE_BUFFER_CHUNKS = 26;
     this.autoStopCallback = null;
     this.onPlaybackEnded = null;
+
+    // Audio Replay & History storage
+    this.currentTurnPcmChunks = [];
+    this.lastAssistantWavBlob = null;
+    this.lastUserAudioBlob = null;
+    this.onTurnAudioReady = null;
 
     // Playback state
     this.playbackAnalyser = null;
@@ -122,7 +156,7 @@ export class AudioPipeline {
     return this.playbackCtx;
   }
 
-  // --- REALTIME STREAMING RECORDING WITH MANUAL VAD & CONCURRENT FALLBACK ---
+  // --- REALTIME STREAMING RECORDING WITH 800MS ROLLING BUFFER & VAD ---
   async startRecording(onAutoStop = null) {
     this.stopPlayback();
     await this.initAudioContext();
@@ -131,6 +165,9 @@ export class AudioPipeline {
     this.rollingPreBuffer = [];
     this.hasSpokenSustained = false;
     this.hasSentActivityStart = false;
+    this.currentTurnPcmChunks = [];
+    this.lastAssistantWavBlob = null;
+    this.lastUserAudioBlob = null;
 
     this.mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -142,7 +179,7 @@ export class AudioPipeline {
       }
     });
 
-    // Start background MediaRecorder as fallback in case Live API connection drops
+    // Start background MediaRecorder to capture user's voice for replay and fallback
     this.audioChunks = [];
     try {
       let mimeType = 'audio/webm;codecs=opus';
@@ -160,7 +197,7 @@ export class AudioPipeline {
 
     this.micSource = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-    // Analyser node for visualizer & VAD energy monitoring
+    // Analyser node for visualizer & wave bars animation
     const micAnalyser = this.audioContext.createAnalyser();
     micAnalyser.fftSize = 128;
     micAnalyser.smoothingTimeConstant = 0.35;
@@ -179,7 +216,8 @@ export class AudioPipeline {
     let lastVoiceTime = 0;
     let autoStopFired = false;
 
-    const SILENCE_LIMIT_MS = 2200;
+    // VAD thresholds
+    const SILENCE_LIMIT_MS = 2400; // 2.4s silence after user stops speaking
     const INITIAL_GRACE_PERIOD_MS = 6000;
     const MAX_DURATION_MS = 60000;
 
@@ -199,25 +237,60 @@ export class AudioPipeline {
 
     const freqData = new Uint8Array(micAnalyser.frequencyBinCount);
 
-    const updateWaveAndVAD = () => {
+    const updateWaveVisualizer = () => {
       if (!this.isRecording) return;
       micAnalyser.getByteFrequencyData(freqData);
 
-      let sum = 0;
       this.waveBars.forEach((bar, idx) => {
         const val = freqData[idx % freqData.length] || 0;
-        sum += val;
         const h = Math.max(6, (val / 255) * 32);
         bar.style.height = `${h}px`;
       });
 
-      const avgEnergy = sum / (this.waveBars.length * 255);
       const now = Date.now();
 
-      if (avgEnergy > 0.08) {
+      // Silence timeout check
+      if (this.hasSpokenSustained && lastVoiceTime > 0 && (now - lastVoiceTime >= SILENCE_LIMIT_MS)) {
+        triggerAutoStop('Nutq yakunlandi va jimlik saqlandi');
+        return;
+      }
+
+      // Initial grace period check
+      if (!this.hasSpokenSustained && (now - recordingStartTime >= INITIAL_GRACE_PERIOD_MS)) {
+        triggerAutoStop('6s davomida ovoz eshitilmadi');
+        return;
+      }
+
+      // 1 minute hard limit
+      if (now - recordingStartTime >= MAX_DURATION_MS) {
+        triggerAutoStop('1 daqiqalik maksimal vaqt yakunlandi');
+        return;
+      }
+
+      requestAnimationFrame(updateWaveVisualizer);
+    };
+
+    // Low-level audio quantum processing callback (runs in Web Audio thread every ~32ms)
+    this.processor.onaudioprocess = (e) => {
+      if (!this.isRecording) return;
+      const rawChannel = e.inputBuffer.getChannelData(0);
+
+      // Direct sample-level RMS calculation for instant speech onset detection
+      let sumSquares = 0;
+      for (let i = 0; i < rawChannel.length; i++) {
+        sumSquares += rawChannel[i] * rawChannel[i];
+      }
+      const chunkRms = Math.sqrt(sumSquares / rawChannel.length);
+
+      const downsampled = downsampleBuffer(rawChannel, this.audioContext.sampleRate, 16000);
+      const pcm16 = floatTo16BitPCM(downsampled);
+      const base64Chunk = int16ToBase64(pcm16);
+
+      // Low threshold (0.02) triggers quickly in ~64ms, preventing any lost initial consonant
+      if (chunkRms > 0.02) {
         speechFramesCount++;
-        if (speechFramesCount >= 4) {
-          lastVoiceTime = now;
+        if (speechFramesCount >= 2) {
+          lastVoiceTime = Date.now();
 
           if (!this.hasSpokenSustained) {
             this.hasSpokenSustained = true;
@@ -226,7 +299,7 @@ export class AudioPipeline {
               this.hasSentActivityStart = true;
               this.liveClient.sendActivityStart();
 
-              // Send rolling 200ms pre-buffer
+              // Send the full 800ms rolling pre-buffer so beginning of question is fully preserved
               while (this.rollingPreBuffer.length > 0) {
                 const chunk = this.rollingPreBuffer.shift();
                 this.liveClient.sendAudioChunk(chunk);
@@ -238,37 +311,12 @@ export class AudioPipeline {
         speechFramesCount = Math.max(0, speechFramesCount - 1);
       }
 
-      if (this.hasSpokenSustained && lastVoiceTime > 0 && (now - lastVoiceTime >= SILENCE_LIMIT_MS)) {
-        triggerAutoStop('Nutq yakunlandi va jimlik saqlandi');
-        return;
-      }
-
-      if (!this.hasSpokenSustained && (now - recordingStartTime >= INITIAL_GRACE_PERIOD_MS)) {
-        triggerAutoStop('6s davomida ovoz eshitilmadi');
-        return;
-      }
-
-      if (now - recordingStartTime >= MAX_DURATION_MS) {
-        triggerAutoStop('1 daqiqalik maksimal vaqt yakunlandi');
-        return;
-      }
-
-      requestAnimationFrame(updateWaveAndVAD);
-    };
-
-    this.processor.onaudioprocess = (e) => {
-      if (!this.isRecording) return;
-      const rawChannel = e.inputBuffer.getChannelData(0);
-
-      const downsampled = downsampleBuffer(rawChannel, this.audioContext.sampleRate, 16000);
-      const pcm16 = floatTo16BitPCM(downsampled);
-      const base64Chunk = int16ToBase64(pcm16);
-
       if (this.hasSentActivityStart) {
         if (this.liveClient?.isConnected) {
           this.liveClient.sendAudioChunk(base64Chunk);
         }
       } else {
+        // Keep 800ms pre-buffer while waiting for speech
         this.rollingPreBuffer.push(base64Chunk);
         if (this.rollingPreBuffer.length > this.MAX_PRE_BUFFER_CHUNKS) {
           this.rollingPreBuffer.shift();
@@ -278,7 +326,7 @@ export class AudioPipeline {
 
     this.isRecording = true;
     this.avatar.setState('listening');
-    updateWaveAndVAD();
+    updateWaveVisualizer();
   }
 
   async stopRecording() {
@@ -304,7 +352,7 @@ export class AudioPipeline {
       this.micSource = null;
     }
 
-    // Capture fallback audio blob from MediaRecorder
+    // Capture user's recorded audio blob for user replay and fallback
     let fallbackData = null;
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
       fallbackData = await new Promise((resolve) => {
@@ -314,12 +362,15 @@ export class AudioPipeline {
             return;
           }
           const blob = new Blob(this.audioChunks, { type: this.mediaRecorder.mimeType || 'audio/webm' });
+          this.lastUserAudioBlob = blob;
+
           const reader = new FileReader();
           reader.onloadend = () => {
             const base64Data = reader.result.split(',')[1];
             resolve({
               data: base64Data,
-              mimeType: blob.type
+              mimeType: blob.type,
+              blob: blob
             });
           };
           reader.onerror = () => resolve(null);
@@ -355,8 +406,11 @@ export class AudioPipeline {
       for (let i = 0; i < binary.length; i++) {
         bytes[i] = binary.charCodeAt(i);
       }
-      const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
 
+      // Store chunk bytes for full assistant response replay
+      this.currentTurnPcmChunks.push(bytes);
+
+      const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
       const sampleRate = mimeType.includes('rate=16000') ? 16000 : 24000;
       const audioBuffer = this.playbackCtx.createBuffer(1, int16.length, sampleRate);
       const channelData = audioBuffer.getChannelData(0);
@@ -392,6 +446,23 @@ export class AudioPipeline {
 
   markLiveTurnComplete() {
     this.isLiveTurnComplete = true;
+
+    // Concatenate all streamed chunks into a canonical 24kHz WAV Blob for replay
+    if (this.currentTurnPcmChunks.length > 0) {
+      let totalLen = 0;
+      for (const chunk of this.currentTurnPcmChunks) totalLen += chunk.length;
+      const allBytes = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const chunk of this.currentTurnPcmChunks) {
+        allBytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      this.lastAssistantWavBlob = pcm16ToWavBlob(allBytes, 24000);
+      if (this.onTurnAudioReady) {
+        this.onTurnAudioReady(this.lastAssistantWavBlob);
+      }
+    }
+
     if (this.activeLiveSources.length === 0) {
       this.handleLivePlaybackFinished();
     }
@@ -467,6 +538,29 @@ export class AudioPipeline {
     this.stopLipSyncLoop();
     this.avatar.setState('idle');
     this.avatar.setMouthOpen(0.16);
+  }
+
+  // --- AUDIO BLOB PLAYBACK (For User & Assistant Replay with Lip-Sync) ---
+  async playAudioBlob(blob) {
+    this.stopPlayback();
+    await this.initPlaybackContext();
+
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioBuffer = await this.playbackCtx.decodeAudioData(arrayBuffer);
+      this.playAudioBuffer(audioBuffer);
+    } catch (decodeErr) {
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      this.currentAudioElement = audio;
+      this.avatar.setState('speaking');
+      audio.onended = () => {
+        this.avatar.setState('idle');
+        URL.revokeObjectURL(url);
+        if (this.onPlaybackEnded) this.onPlaybackEnded();
+      };
+      await audio.play();
+    }
   }
 
   // --- TRADITIONAL BASE64 AUDIO PLAYBACK (Fallback & Replay) ---
