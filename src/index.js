@@ -381,7 +381,32 @@ export default {
 
     // --- STATIC ASSETS ---
     if (env.ASSETS) {
-      return env.ASSETS.fetch(request);
+      // Map /favicon.ico to /favicon.png
+      if (url.pathname === '/favicon.ico') {
+        const favReq = new Request(new URL('/favicon.png', request.url), request);
+        const favRes = await env.ASSETS.fetch(favReq);
+        if (favRes.ok) {
+          const headers = new Headers(favRes.headers);
+          headers.set('Content-Type', 'image/png');
+          headers.set('Cache-Control', 'public, max-age=604800');
+          return new Response(favRes.body, { status: 200, headers });
+        }
+      }
+
+      const res = await env.ASSETS.fetch(request);
+
+      // Fast caching for 3D model (.glb) and media assets (1 year immutable)
+      if (url.pathname.endsWith('.glb') || url.pathname.endsWith('.gltf') || url.pathname.endsWith('.png') || url.pathname.endsWith('.jpg') || url.pathname.endsWith('.webp')) {
+        const headers = new Headers(res.headers);
+        headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+        return new Response(res.body, {
+          status: res.status,
+          statusText: res.statusText,
+          headers
+        });
+      }
+
+      return res;
     }
     return new Response('Not Found', { status: 404 });
   }

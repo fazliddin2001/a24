@@ -161,81 +161,175 @@ export class Avatar3DController {
     }
   }
 
-  loadModel(url) {
+  async loadModel(url) {
     const loader = new GLTFLoader();
+    const CACHE_NAME = 'a24-avatar-cache-v1';
 
-    loader.load(
-      url,
-      (gltf) => {
-        this.avatarRoot = gltf.scene;
+    try {
+      let arrayBuffer = null;
 
-        const nodesToRemove = [];
-
-        // Traverse & find nodes
-        this.avatarRoot.traverse((child) => {
-          // Remove default Blender Cube
-          if (child.name && child.name.toLowerCase().includes('cube')) {
-            child.visible = false;
-            nodesToRemove.push(child);
-          }
-
-          if (child.name === 'OVR_EyesClosed') {
-            this.ovrEyesClosed = child;
-            this.configureOverlayMesh(child, 10);
-          }
-
-          if (child.name === 'OVR_MouthWide') {
-            this.ovrMouthWide = child;
-            this.configureOverlayMesh(child, 12);
-          }
-
-          if (child.name === 'Mesh_0.001') {
-            this.baseMesh = child;
-            if (child.material) {
-              child.material.depthTest = true;
-              child.material.depthWrite = true;
+      // 1. Check persistent device storage (CacheStorage) for instant 20ms load
+      if ('caches' in window) {
+        try {
+          const cache = await caches.open(CACHE_NAME);
+          const cachedResponse = await cache.match(url);
+          if (cachedResponse) {
+            console.log('⚡ 3D model qurilma keshidan darhol yuklandi (CacheStorage)!');
+            if (this.loaderEl) {
+              const txt = this.loaderEl.querySelector('.loader-text');
+              if (txt) txt.textContent = `3D Model yuklanmoqda... 100%`;
             }
+            arrayBuffer = await cachedResponse.arrayBuffer();
           }
-        });
-
-        // Strip Cube nodes completely
-        nodesToRemove.forEach((node) => {
-          if (node.parent) node.parent.remove(node);
-        });
-
-        // Center the avatar model perfectly in the viewport
-        const box = new THREE.Box3().setFromObject(this.avatarRoot);
-        this.centerOffset = box.getCenter(new THREE.Vector3());
-        this.avatarRoot.position.x = -this.centerOffset.x;
-        this.avatarRoot.position.y = -this.centerOffset.y - 0.05;
-        this.avatarRoot.position.z = -this.centerOffset.z;
-
-        this.scene.add(this.avatarRoot);
-
-        // Strict initial visibility fix: hide overlays completely
-        this.setOverlayVisible(this.ovrEyesClosed, false);
-        this.setOverlayVisible(this.ovrMouthWide, false);
-
-        this.isLoaded = true;
-        this.hideLoadingUI();
-        this.initBlinking();
-        this.setState('idle');
-      },
-      (xhr) => {
-        if (xhr.lengthComputable && this.loaderEl) {
-          const percent = Math.round((xhr.loaded / xhr.total) * 100);
-          const txt = this.loaderEl.querySelector('.loader-text');
-          if (txt) txt.textContent = `3D Model yuklanmoqda... ${percent}%`;
-        }
-      },
-      (error) => {
-        console.error('GLTF Load error:', error);
-        if (this.loaderEl) {
-          const txt = this.loaderEl.querySelector('.loader-text');
-          if (txt) txt.textContent = 'Model yuklanmadi';
+        } catch (cacheReadErr) {
+          console.warn('CacheStorage read error:', cacheReadErr);
         }
       }
-    );
+
+      // 2. If not yet in cache, fetch with stream progress and store permanently
+      if (!arrayBuffer) {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP xatosi: ${response.status}`);
+
+        const contentLength = response.headers.get('content-length');
+        const total = contentLength ? parseInt(contentLength, 10) : 11005540;
+
+        const reader = response.body.getReader();
+        let loaded = 0;
+        const chunks = [];
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          loaded += value.length;
+          if (this.loaderEl) {
+            const percent = Math.min(99, Math.round((loaded / total) * 100));
+            const txt = this.loaderEl.querySelector('.loader-text');
+            if (txt) txt.textContent = `3D Model yuklanmoqda... ${percent}%`;
+          }
+        }
+
+        const combined = new Uint8Array(loaded);
+        let offset = 0;
+        for (const chunk of chunks) {
+          combined.set(chunk, offset);
+          offset += chunk.length;
+        }
+        arrayBuffer = combined.buffer;
+
+        // Save into device cache so future visits load in 0.05 seconds
+        if ('caches' in window) {
+          try {
+            const cache = await caches.open(CACHE_NAME);
+            const headers = new Headers({
+              'Content-Type': 'model/gltf-binary',
+              'Content-Length': String(loaded)
+            });
+            await cache.put(url, new Response(arrayBuffer.slice(0), { headers }));
+            console.log('✅ 3D model qurilma keshiga saqlandi.');
+          } catch (cachePutErr) {
+            console.warn('Could not store model in CacheStorage:', cachePutErr);
+          }
+        }
+      }
+
+      // 3. Parse ArrayBuffer with GLTFLoader
+      loader.parse(
+        arrayBuffer,
+        '',
+        (gltf) => {
+          this.avatarRoot = gltf.scene;
+          this.setupModelScene();
+        },
+        (err) => {
+          console.error('GLTF parse error:', err);
+          this.onLoadError(err);
+        }
+      );
+
+    } catch (err) {
+      console.warn('Fast stream cache failed, falling back to standard loader:', err);
+      loader.load(
+        url,
+        (gltf) => {
+          this.avatarRoot = gltf.scene;
+          this.setupModelScene();
+        },
+        (xhr) => {
+          if (xhr.lengthComputable && this.loaderEl) {
+            const percent = Math.round((xhr.loaded / xhr.total) * 100);
+            const txt = this.loaderEl.querySelector('.loader-text');
+            if (txt) txt.textContent = `3D Model yuklanmoqda... ${percent}%`;
+          }
+        },
+        (error) => {
+          this.onLoadError(error);
+        }
+      );
+    }
+  }
+
+  setupModelScene() {
+    const nodesToRemove = [];
+
+    // Traverse & find nodes
+    this.avatarRoot.traverse((child) => {
+      // Remove default Blender Cube
+      if (child.name && child.name.toLowerCase().includes('cube')) {
+        child.visible = false;
+        nodesToRemove.push(child);
+      }
+
+      if (child.name === 'OVR_EyesClosed') {
+        this.ovrEyesClosed = child;
+        this.configureOverlayMesh(child, 10);
+      }
+
+      if (child.name === 'OVR_MouthWide') {
+        this.ovrMouthWide = child;
+        this.configureOverlayMesh(child, 12);
+      }
+
+      if (child.name === 'Mesh_0.001') {
+        this.baseMesh = child;
+        if (child.material) {
+          child.material.depthTest = true;
+          child.material.depthWrite = true;
+        }
+      }
+    });
+
+    // Strip Cube nodes completely
+    nodesToRemove.forEach((node) => {
+      if (node.parent) node.parent.remove(node);
+    });
+
+    // Center the avatar model perfectly in the viewport
+    const box = new THREE.Box3().setFromObject(this.avatarRoot);
+    this.centerOffset = box.getCenter(new THREE.Vector3());
+    this.avatarRoot.position.x = -this.centerOffset.x;
+    this.avatarRoot.position.y = -this.centerOffset.y - 0.05;
+    this.avatarRoot.position.z = -this.centerOffset.z;
+
+    this.scene.add(this.avatarRoot);
+
+    // Strict initial visibility fix: hide overlays completely
+    this.setOverlayVisible(this.ovrEyesClosed, false);
+    this.setOverlayVisible(this.ovrMouthWide, false);
+
+    this.isLoaded = true;
+    this.hideLoadingUI();
+    this.initBlinking();
+    this.setState('idle');
+  }
+
+  onLoadError(error) {
+    console.error('GLTF Load error:', error);
+    if (this.loaderEl) {
+      const txt = this.loaderEl.querySelector('.loader-text');
+      if (txt) txt.textContent = 'Model yuklanmadi';
+    }
   }
 
   configureOverlayMesh(mesh, renderOrder) {

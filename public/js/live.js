@@ -63,23 +63,10 @@ export class GeminiLiveClient {
       return;
     }
 
-    // Attempt 1: Cloudflare AI Gateway WebSocket (logs will appear in AI Gateway!)
-    if (this.config.gatewayUrl) {
-      try {
-        console.log('Connecting to Cloudflare AI Gateway Live WebSocket...');
-        const protocols = this.config.token ? [`cf-aig-authorization.${this.config.token}`] : [];
-        await this.tryConnectUrl(this.config.gatewayUrl, protocols);
-        this.isConnecting = false;
-        return;
-      } catch (gwErr) {
-        console.warn('Cloudflare AI Gateway WebSocket connection failed, trying direct Google endpoint:', gwErr);
-      }
-    }
-
-    // Attempt 2: Direct Google Generative Service WebSocket endpoint
+    // Connect directly to Google Gemini Live WebSocket endpoint (Drop AI gateway per user request for direct speed)
     if (this.config.directUrl) {
       try {
-        console.log('Connecting to Google Gemini Live WebSocket directly...');
+        console.log('⚡ Connecting directly to Google Gemini Live WebSocket...');
         await this.tryConnectUrl(this.config.directUrl, []);
         this.isConnecting = false;
         return;
