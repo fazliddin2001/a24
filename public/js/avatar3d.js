@@ -6,10 +6,11 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
  * Implements:
  * - GLB loading & rendering at medium responsive size (320px desktop, 240px mobile)
  * - Draggable movement around the page with dock reset
+ * - Enhanced 3D perspective & head movement with cursor parallax
  * - Natural idle eye blinking (~every 3.5-5.5s)
- * - State management (idle, listening, thinking, speaking)
+ * - Smooth biological lip-sync with attack/release envelope & cadence
  * - Strict overlay visibility handling (object.visible = false AND ShowOverlay shape key = 0)
- * - Audio-reactive mouth overlays with immediate close on speech end
+ * - State management (idle, listening, thinking, speaking)
  * - Removal of Blender default Cube
  */
 export class Avatar3DController {
@@ -25,6 +26,8 @@ export class Avatar3DController {
     this.ovrMouthWide = null;
     this.baseMesh = null;
     this.avatarRoot = null;
+    this.keyLight = null;
+    this.centerOffset = new THREE.Vector3(0, 0, 0);
 
     // Animation & State
     this.state = 'idle'; // 'idle' | 'listening' | 'thinking' | 'speaking'
@@ -35,6 +38,10 @@ export class Avatar3DController {
     this.pulseEnd = 0;
     this.isLoaded = false;
 
+    // Smooth Lip Articulation Envelope
+    this.targetMouthOpen = 0.0;
+    this.currentMouthOpen = 0.0;
+
     // Three.js Core
     this.scene = null;
     this.camera = null;
@@ -42,7 +49,7 @@ export class Avatar3DController {
     this.animFrameId = null;
     this.clock = new THREE.Clock();
 
-    // Subtle natural head orientation tracking
+    // Natural 3D head orientation tracking (expanded range for 3D depth)
     this.mouseTarget = new THREE.Vector2(0, 0);
     this.mouseCurrent = new THREE.Vector2(0, 0);
 
@@ -58,7 +65,7 @@ export class Avatar3DController {
     // Scene
     this.scene = new THREE.Scene();
 
-    // Camera (FOV 36 frames the character head & shoulders cleanly)
+    // Camera (FOV 36 frames the character head & shoulders cleanly with true perspective)
     this.camera = new THREE.PerspectiveCamera(36, width / height, 0.1, 100);
     this.camera.position.set(0, 0.05, 3.1);
 
@@ -91,9 +98,9 @@ export class Avatar3DController {
     this.scene.add(ambientLight);
 
     // Key Light (warm front-top right)
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
-    keyLight.position.set(2.5, 3.8, 3.2);
-    this.scene.add(keyLight);
+    this.keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
+    this.keyLight.position.set(2.5, 3.8, 3.2);
+    this.scene.add(this.keyLight);
 
     // Fill Light (soft cool front-left)
     const fillLight = new THREE.DirectionalLight(0xe0efff, 1.2);
@@ -118,7 +125,7 @@ export class Avatar3DController {
     });
     resizeObserver.observe(this.container);
 
-    // Pointer move listener for subtle natural head looking
+    // Pointer move listener with expanded range for realistic 3D viewing
     window.addEventListener('pointermove', (e) => {
       if (!this.container) return;
       const rect = this.container.getBoundingClientRect();
@@ -126,9 +133,13 @@ export class Avatar3DController {
       const cy = rect.top + rect.height / 2;
       const nx = (e.clientX - cx) / (window.innerWidth / 2);
       const ny = (e.clientY - cy) / (window.innerHeight / 2);
+
+      // Expanded horizontal & vertical room:
+      // ~31.5 deg max horizontal rotation, ~16 deg vertical tilt.
+      // Shows the 3D depth of face, nose, braids, and cap without exposing back/edges.
       this.mouseTarget.set(
-        Math.max(-0.35, Math.min(0.35, nx * 0.25)),
-        Math.max(-0.2, Math.min(0.2, -ny * 0.18))
+        Math.max(-0.55, Math.min(0.55, nx * 0.45)),
+        Math.max(-0.28, Math.min(0.28, -ny * 0.24))
       );
     });
 
@@ -198,10 +209,10 @@ export class Avatar3DController {
 
         // Center the avatar model perfectly in the viewport
         const box = new THREE.Box3().setFromObject(this.avatarRoot);
-        const center = box.getCenter(new THREE.Vector3());
-        this.avatarRoot.position.x = -center.x;
-        this.avatarRoot.position.y = -center.y - 0.05;
-        this.avatarRoot.position.z = -center.z;
+        this.centerOffset = box.getCenter(new THREE.Vector3());
+        this.avatarRoot.position.x = -this.centerOffset.x;
+        this.avatarRoot.position.y = -this.centerOffset.y - 0.05;
+        this.avatarRoot.position.z = -this.centerOffset.z;
 
         this.scene.add(this.avatarRoot);
 
@@ -297,24 +308,26 @@ export class Avatar3DController {
   }
 
   // --- MOUTH OPENING / AUDIO LIP-SYNC ---
+  /**
+   * Sets the target vocal energy.
+   * Instead of abruptly turning overlays on/off, values are filtered through
+   * an organic attack/release envelope in the 60 FPS animation loop.
+   */
   setMouthOpen(value) {
-    if (!this.ovrMouthWide || !this.isLoaded) return;
-
-    // Only allow mouth opening when actively speaking
     if (this.state !== 'speaking') {
-      this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
+      this.targetMouthOpen = 0.0;
       return;
     }
 
     const v = Number(value) || 0.0;
 
-    // Audio threshold: if sound drops (pause between words), close immediately
-    if (v < 0.22) {
-      this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
+    // Vocal noise floor filter
+    if (v < 0.10) {
+      this.targetMouthOpen = 0.0;
     } else {
-      // Map audio energy to mouth shape key intensity
-      const weight = Math.min(1.0, Math.max(0.4, (v - 0.2) * 1.5));
-      this.setOverlayVisible(this.ovrMouthWide, true, weight);
+      // Map voice energy to smooth opening intensity with natural power response
+      const normalized = Math.min(1.0, (v - 0.10) / 0.45);
+      this.targetMouthOpen = Math.pow(normalized, 0.85);
     }
   }
 
@@ -336,6 +349,8 @@ export class Avatar3DController {
 
       // Listening / recording: Keep mouth closed and disable blinking
       this.isBlinking = false;
+      this.targetMouthOpen = 0.0;
+      this.currentMouthOpen = 0.0;
       this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
       this.setOverlayVisible(this.ovrEyesClosed, false, 0.0);
     } else if (state === 'thinking') {
@@ -345,6 +360,8 @@ export class Avatar3DController {
 
       // Thinking: Hide mouth overlays and disable blinking
       this.isBlinking = false;
+      this.targetMouthOpen = 0.0;
+      this.currentMouthOpen = 0.0;
       this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
       this.setOverlayVisible(this.ovrEyesClosed, false, 0.0);
     } else if (state === 'speaking') {
@@ -358,6 +375,8 @@ export class Avatar3DController {
       // Idle: Ready, enable blinking, mouth strictly closed
       this.updateStatus('Tayyor (Ready)', '#10b981');
       this.stopPulse();
+      this.targetMouthOpen = 0.0;
+      this.currentMouthOpen = 0.0;
       this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
       this.setOverlayVisible(this.ovrEyesClosed, false, 0.0);
     }
@@ -384,7 +403,7 @@ export class Avatar3DController {
       const t = (now - this.pulseStart) / 1000;
       // Syllable oscillation rhythm
       const syllable = Math.sin(t * 11.2) * 0.5 + Math.sin(t * 5.6 + 0.8) * 0.3 + 0.2;
-      this.setMouthOpen(0.16 + Math.max(0, syllable * 0.7));
+      this.setMouthOpen(0.12 + Math.max(0, syllable * 0.55));
       this.pulseRaf = requestAnimationFrame(loop);
     };
 
@@ -397,6 +416,8 @@ export class Avatar3DController {
       this.pulseRaf = null;
     }
     this.pulseEnd = 0;
+    this.targetMouthOpen = 0.0;
+    this.currentMouthOpen = 0.0;
     this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
   }
 
@@ -528,16 +549,62 @@ export class Avatar3DController {
     const elapsedTime = this.clock.getElapsedTime();
 
     if (this.avatarRoot) {
-      // Smooth interpolation for head tracking
-      this.mouseCurrent.lerp(this.mouseTarget, 0.08);
+      // Fluid natural interpolation for head tracking
+      this.mouseCurrent.lerp(this.mouseTarget, 0.065);
 
-      // Natural breathing sway and gentle posture oscillation
+      // Natural breathing sway & subtle posture oscillation
       const breathingSway = Math.sin(elapsedTime * 1.6) * 0.015;
       const gentleTilt = Math.cos(elapsedTime * 0.8) * 0.008;
 
+      // 3D Rotations: Y-yaw, X-pitch, and Z-roll tilt
       this.avatarRoot.rotation.y = this.mouseCurrent.x + gentleTilt;
-      this.avatarRoot.rotation.x = this.mouseCurrent.y + breathingSway * 0.5;
-      this.avatarRoot.position.y = -0.05 + breathingSway * 0.02;
+      this.avatarRoot.rotation.x = this.mouseCurrent.y + breathingSway * 0.4;
+      this.avatarRoot.rotation.z = -this.mouseCurrent.x * 0.09; // Natural ear-to-shoulder tilt
+
+      // 3D Parallax Translations: moves in X, Y and depth Z to emphasize 3D geometry
+      this.avatarRoot.position.x = -this.centerOffset.x + this.mouseCurrent.x * 0.12;
+      this.avatarRoot.position.y = -this.centerOffset.y - 0.05 + this.mouseCurrent.y * 0.08 + breathingSway * 0.02;
+      this.avatarRoot.position.z = -this.centerOffset.z - Math.abs(this.mouseCurrent.x) * 0.05;
+
+      // Dynamic key light shift: glints across the cheeks as the head turns
+      if (this.keyLight) {
+        this.keyLight.position.set(
+          2.5 + this.mouseCurrent.x * 1.5,
+          3.8 + this.mouseCurrent.y * 1.0,
+          3.2
+        );
+      }
+    }
+
+    // --- SMOOTH MOUTH MOVEMENT & CADENCE ---
+    if (this.ovrMouthWide && this.isLoaded) {
+      if (this.state === 'speaking') {
+        const target = this.targetMouthOpen;
+        // Asymmetric filter: fast opening attack (0.28), smooth closing decay (0.15)
+        const rate = target > this.currentMouthOpen ? 0.28 : 0.15;
+        this.currentMouthOpen += (target - this.currentMouthOpen) * rate;
+
+        // Organic syllable micro-modulation for human speech articulation
+        let mouthWeight = this.currentMouthOpen;
+        if (this.currentMouthOpen > 0.06) {
+          // Natural 4.2Hz speech cadence rhythm
+          const cadence = Math.sin(elapsedTime * 24.0) * 0.10 + Math.sin(elapsedTime * 12.0) * 0.05;
+          mouthWeight = Math.max(0.0, Math.min(1.0, this.currentMouthOpen + cadence));
+        }
+
+        // Hysteresis threshold to prevent flickering
+        if (mouthWeight > 0.025) {
+          this.setOverlayVisible(this.ovrMouthWide, true, mouthWeight);
+        } else {
+          this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
+        }
+      } else {
+        if (this.currentMouthOpen > 0.005) {
+          this.currentMouthOpen = 0.0;
+          this.targetMouthOpen = 0.0;
+          this.setOverlayVisible(this.ovrMouthWide, false, 0.0);
+        }
+      }
     }
 
     if (this.renderer && this.scene && this.camera) {

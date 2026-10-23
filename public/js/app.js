@@ -1,6 +1,7 @@
 import { AvatarController } from './avatar.js';
 import { AudioPipeline } from './audio.js';
 import { AuthManager } from './auth.js';
+import { WakeWordListener } from './wakeword.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   // DOM Elements
@@ -10,6 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const statusSection = document.getElementById('avatarSection');
   const waveformBox = document.getElementById('waveformBox');
   const micBtn = document.getElementById('micButton');
+  const wakeBadge = document.getElementById('wakeBadge');
   const chatHistory = document.getElementById('chatHistory');
   const textInput = document.getElementById('textInput');
   const sendBtn = document.getElementById('sendBtn');
@@ -32,6 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let conversationHistory = [];
   let turnCount = 1;
   const MAX_TURNS = 4;
+  let isRecording = false;
 
   const updateTurnUI = () => {
     if (turnCounter) turnCounter.textContent = `${turnCount} / ${MAX_TURNS}`;
@@ -52,7 +55,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Auth initialization
   const auth = new AuthManager(authModal, authError, authInput, authBtn, () => {
-    // Authenticated callback
     console.log('Foydalanuvchi tasdiqlandi');
   });
   auth.checkAuth();
@@ -99,6 +101,7 @@ document.addEventListener('DOMContentLoaded', () => {
       replayBtn.className = 'message-audio-btn';
       replayBtn.innerHTML = '▶ Qayta tinglash';
       replayBtn.addEventListener('click', () => {
+        wakeWord.pause();
         audio.playBase64Audio(audioBase64);
       });
       bubble.appendChild(replayBtn);
@@ -121,14 +124,53 @@ document.addEventListener('DOMContentLoaded', () => {
     chatHistory.scrollTop = chatHistory.scrollHeight;
   }
 
+  // --- RECORDING WORKFLOW WITH VAD (SILENCE & 1-MIN CAP) ---
+  async function startRecordingFlow() {
+    if (isRecording) return;
+    try {
+      wakeWord.pause();
+      isRecording = true;
+      micBtn.classList.add('recording');
+      micBtn.innerHTML = '⏹';
+
+      // startRecording accepts onAutoStop callback (fired by 1.8s silence or 60s max)
+      await audio.startRecording(async () => {
+        await stopRecordingFlow();
+      });
+    } catch (err) {
+      isRecording = false;
+      micBtn.classList.remove('recording');
+      micBtn.innerHTML = '🎙';
+      console.error('Mic start error:', err);
+      alert('Mikrofon ruxsati berilmadi yoki mavjud emas: ' + err.message);
+      wakeWord.resume();
+    }
+  }
+
+  async function stopRecordingFlow() {
+    if (!isRecording) return;
+    isRecording = false;
+    micBtn.classList.remove('recording');
+    micBtn.innerHTML = '🎙';
+
+    const audioData = await audio.stopRecording();
+    if (audioData) {
+      submitQuery({ audioData });
+    } else {
+      wakeWord.resume();
+    }
+  }
+
   // Submit User Request (Audio or Text)
   async function submitQuery({ audioData, text }) {
     if (avatar.state === 'thinking' || avatar.state === 'speaking') return;
 
+    wakeWord.pause();
+
     if (text) {
       appendMessage('user', text);
     } else {
-      appendMessage('user', '🎙 Ovozli xabar...');
+      appendMessage('user', '🎙 Ovozli savol berildi...');
     }
 
     avatar.setState('thinking');
@@ -159,6 +201,7 @@ document.addEventListener('DOMContentLoaded', () => {
         localStorage.removeItem('a24_token');
         auth.showModal();
         avatar.setState('idle');
+        wakeWord.resume();
         return;
       }
 
@@ -172,7 +215,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // Render assistant message
       appendMessage('assistant', data.text, data.thought, data.audio);
 
-      // Save to history (trimmed representation)
+      // Save to history
       conversationHistory.push({
         role: 'user',
         parts: text ? [{ text }] : [{ text: 'Foydalanuvchi ovozli savol berdi' }]
@@ -186,11 +229,12 @@ document.addEventListener('DOMContentLoaded', () => {
       turnCount = (data.turnCount || turnCount) + 1;
       updateTurnUI();
 
-      // Play returned TTS audio (which drives lip-sync)
+      // Play returned TTS audio (which drives smooth 3D lip-sync)
       if (data.audio) {
         audio.playBase64Audio(data.audio, data.audioMimeType || 'audio/mp3');
       } else {
         avatar.setState('idle');
+        wakeWord.resume();
       }
 
       // Check context turn limit (3-4 turns)
@@ -204,31 +248,67 @@ document.addEventListener('DOMContentLoaded', () => {
       console.error(err);
       appendMessage('assistant', `Kechirasiz, xatolik yuz berdi: ${err.message}`);
       avatar.setState('idle');
+      wakeWord.resume();
     }
   }
 
-  // Microphone Button Handler
-  let isRecording = false;
+  // --- WAKE WORD LISTENER ("Malika") ---
+  const wakeWord = new WakeWordListener(
+    (detectedTranscript) => {
+      console.log('⚡ "Malika" wake-word triggered!');
+      if (wakeBadge) {
+        wakeBadge.classList.add('triggered');
+        const textSpan = wakeBadge.querySelector('.wake-word-text');
+        if (textSpan) textSpan.textContent = '"Malika" eshitildi!';
+      }
+      setTimeout(() => {
+        if (wakeBadge) {
+          wakeBadge.classList.remove('triggered');
+          const textSpan = wakeBadge.querySelector('.wake-word-text');
+          if (textSpan) textSpan.textContent = '"Malika" deb chaqiring';
+        }
+      }, 1600);
 
-  micBtn.addEventListener('click', async () => {
+      // Automatically activate recording
+      startRecordingFlow();
+    },
+    (isActive, status) => {
+      if (wakeBadge) {
+        if (isActive) {
+          wakeBadge.classList.add('active');
+          wakeBadge.title = "Ovozli chaqiruv faol: 'Malika' deb ayting (o'chirish uchun bosing)";
+        } else if (status !== 'paused') {
+          wakeBadge.classList.remove('active');
+          wakeBadge.title = "Ovozli chaqiruv o'chiq (yoqish uchun bosing)";
+        }
+      }
+    }
+  );
+
+  // Resume wake-word listening automatically when assistant completes speaking
+  audio.onPlaybackEnded = () => {
+    wakeWord.resume();
+  };
+
+  // Toggle wake word manually via badge click
+  if (wakeBadge) {
+    wakeBadge.addEventListener('click', () => {
+      const active = wakeWord.toggle();
+      if (!active) {
+        wakeBadge.classList.remove('active');
+      }
+    });
+  }
+
+  // Start wake-word continuous detection
+  wakeWord.start();
+
+  // Microphone Manual Click Handler
+  micBtn.addEventListener('click', () => {
     if (!isRecording) {
-      try {
-        await audio.startRecording();
-        isRecording = true;
-        micBtn.classList.add('recording');
-        micBtn.innerHTML = '⏹';
-      } catch (err) {
-        alert('Mikrofon ruxsati berilmadi yoki mavjud emas: ' + err.message);
-      }
+      startRecordingFlow();
     } else {
-      isRecording = false;
-      micBtn.classList.remove('recording');
-      micBtn.innerHTML = '🎙';
-
-      const audioData = await audio.stopRecording();
-      if (audioData) {
-        submitQuery({ audioData });
-      }
+      stopRecordingFlow();
     }
   });
 
@@ -245,7 +325,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter') handleTextSend();
   });
 
-  // Quick Chips
+  // Quick Suggestion Chips
   quickChips.forEach(chip => {
     chip.addEventListener('click', () => {
       const q = chip.getAttribute('data-q');
