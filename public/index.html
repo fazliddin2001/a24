@@ -34,6 +34,7 @@
         <span class="turn-dot"></span>
         <span>Navbat: <strong id="turnCounter">1 / 4</strong></span>
       </div>
+      <button class="btn-secondary-sm" id="adminDataBtn" title="Institut ma'lumotlari va statistikasini tahrirlash (Admin)">⚙️ Ma'lumotlar</button>
       <button class="btn-secondary-sm" id="resetBtn" title="Suhbat tarixini tozalash">🔄 Yangi suhbat</button>
     </div>
   </header>
@@ -107,6 +108,91 @@
       <input type="password" id="authPasswordInput" class="auth-input" placeholder="Parolni kiriting..." autocomplete="current-password" />
       <button id="authSubmitBtn" class="auth-btn">Kirish</button>
       <div class="auth-error" id="authError"></div>
+    </div>
+  </div>
+
+  <!-- Admin Institute Data Management Modal -->
+  <div class="modal-overlay" id="adminDataModal" style="display: none;">
+    <div class="admin-modal-card">
+      <div class="admin-modal-header">
+        <div class="admin-modal-title-box">
+          <div class="admin-title-row">
+            <span class="admin-badge">ADMIN</span>
+            <h2>Institut Ma'lumotlari va Statistikasi</h2>
+          </div>
+          <p>Ushbu ma'lumotlar Malika ovozli yordamchisining bilim bazasi hisoblanadi.</p>
+        </div>
+        <button class="modal-close-btn" id="closeAdminModalBtn" title="Yopish">✕</button>
+      </div>
+
+      <!-- Tab Switcher -->
+      <div class="admin-tabs">
+        <button class="admin-tab-btn active" id="tabVisualBtn">📝 Vizual Tahrirchi</button>
+        <button class="admin-tab-btn" id="tabJsonBtn">{ } JSON Kod</button>
+      </div>
+
+      <!-- Tab 1: Visual Editor -->
+      <div class="admin-tab-content active" id="tabVisualContent">
+        <!-- Section Filter / Dropdown Bar -->
+        <div class="admin-filter-bar">
+          <div class="admin-select-wrap">
+            <label for="sectionSelector">Bo'lim:</label>
+            <select id="sectionSelector" class="admin-select">
+              <option value="all">Barcha bo'limlar</option>
+              <option value="general">🏢 Asosiy ma'lumotlar</option>
+              <option value="statistics">📊 Statistika</option>
+              <option value="faculties">🎓 Fakultetlar va yo'nalishlar</option>
+              <option value="academicSystems">💻 Ta'lim tizimlari (HEMIS, ECTS)</option>
+              <option value="studentServices">🏠 Talabalar xizmatlari (TTJ, Shartnoma)</option>
+              <option value="custom">✨ Boshqa / Maxsus bo'limlar</option>
+            </select>
+          </div>
+          <div class="admin-header-actions-bar">
+            <button class="btn-action-primary" id="addNewObjectBtn">+ Yangi bo'lim (Obyekt) qo'shish</button>
+            <button class="btn-action-primary" id="addNewFacultyBtn">+ Yangi fakultet qo'shish</button>
+          </div>
+        </div>
+
+        <div class="admin-sections-list" id="adminSectionsList">
+          <!-- Dynamically populated by admin.js -->
+        </div>
+      </div>
+
+      <!-- Tab 2: Raw JSON Editor -->
+      <div class="admin-tab-content" id="tabJsonContent" style="display: none;">
+        <div class="json-editor-toolbar">
+          <span class="json-hint">JSON formatida to'g'ridan-to'g'ri istalgan obyekt, massiv va maydonlarni tahrirlashingiz mumkin:</span>
+          <button class="btn-secondary-sm" id="prettifyJsonBtn">Formatlash</button>
+        </div>
+        <textarea id="jsonTextarea" class="admin-json-textarea" spellcheck="false"></textarea>
+        <div class="json-syntax-error" id="jsonSyntaxError"></div>
+      </div>
+
+      <!-- Admin Modal Footer -->
+      <div class="admin-modal-footer">
+        <div class="admin-footer-status" id="adminFooterStatus">
+          <span>O'zgarishlar saqlangach, Malika bilim bazasida darhol aks etadi.</span>
+        </div>
+        <div class="admin-footer-btns">
+          <button class="btn-secondary" id="cancelAdminBtn">Bekor qilish</button>
+          <button class="btn-primary" id="saveAdminBtn">💾 Saqlash</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin Password Confirmation Prompt Modal -->
+  <div class="modal-overlay" id="adminPassPromptModal" style="display: none;">
+    <div class="auth-card admin-pass-card">
+      <div class="auth-lock-icon">🔒</div>
+      <h2>Admin Tasdiqlash</h2>
+      <p>Institut ma'lumotlarini saqlash uchun <code>admin_pass</code> parolini kiriting:</p>
+      <input type="password" id="adminPassInput" class="auth-input" placeholder="Admin parolini kiriting..." autocomplete="current-password" />
+      <div class="auth-error" id="adminPassError"></div>
+      <div class="admin-pass-btn-row">
+        <button class="btn-secondary" id="cancelAdminPassBtn">Bekor qilish</button>
+        <button class="auth-btn" id="confirmAdminPassBtn">Tasdiqlash va Saqlash</button>
+      </div>
     </div>
   </div>
 

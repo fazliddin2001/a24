@@ -2,6 +2,7 @@ import { AvatarController } from './avatar.js';
 import { AudioPipeline } from './audio.js';
 import { AuthManager } from './auth.js';
 import { WakeWordListener } from './wakeword.js';
+import { AdminPanelController } from './admin.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   // DOM Elements
@@ -29,6 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Controllers
   const avatar = new AvatarController(avatarEl, statusText, statusDot, statusSection);
   const audio = new AudioPipeline(avatar, waveformBox);
+  const adminPanel = new AdminPanelController();
 
   // Conversation State
   let conversationHistory = [];
