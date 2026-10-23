@@ -1,3 +1,8 @@
+/assets/*.gz
+  Cache-Control: public, max-age=31536000, immutable
+  Access-Control-Allow-Origin: *
+  Content-Type: application/gzip
+
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
   Access-Control-Allow-Origin: *

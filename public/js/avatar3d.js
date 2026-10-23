@@ -164,6 +164,7 @@ export class Avatar3DController {
   async loadModel(url) {
     const loader = new GLTFLoader();
     const CACHE_NAME = 'a24-avatar-cache-v2';
+    const CACHE_KEY = 'assets/untitled.glb';
 
     try {
       let arrayBuffer = null;
@@ -172,7 +173,7 @@ export class Avatar3DController {
       if ('caches' in window) {
         try {
           const cache = await caches.open(CACHE_NAME);
-          const cachedResponse = await cache.match(url);
+          const cachedResponse = await cache.match(CACHE_KEY);
           if (cachedResponse) {
             console.log('⚡ 3D model qurilma keshidan darhol yuklandi (CacheStorage)!');
             if (this.loaderEl) {
@@ -186,14 +187,18 @@ export class Avatar3DController {
         }
       }
 
-      // 2. If not yet in cache, fetch with stream progress and store permanently
+      // 2. If not yet in cache, fetch 2.5MB gzip stream with progress and store permanently
       if (!arrayBuffer) {
-        const response = await fetch(url);
+        const supportsDecompression = typeof DecompressionStream !== 'undefined';
+        const targetUrl = supportsDecompression ? 'assets/untitled.glb.gz' : 'assets/untitled.glb';
+
+        const response = await fetch(targetUrl);
         if (!response.ok) throw new Error(`HTTP xatosi: ${response.status}`);
 
-        const decompressedLength = response.headers.get('x-decompressed-content-length');
         const contentLength = response.headers.get('content-length');
-        const total = decompressedLength ? parseInt(decompressedLength, 10) : (contentLength ? parseInt(contentLength, 10) : 7903004);
+        const expectedTotal = supportsDecompression
+          ? (contentLength ? parseInt(contentLength, 10) : 2661849)
+          : (contentLength ? parseInt(contentLength, 10) : 7903004);
 
         const reader = response.body.getReader();
         let loaded = 0;
@@ -205,15 +210,10 @@ export class Avatar3DController {
           chunks.push(value);
           loaded += value.length;
           if (this.loaderEl) {
-            const percent = Math.min(99, Math.round((loaded / total) * 100));
+            const percent = Math.min(99, Math.round((loaded / expectedTotal) * 100));
             const txt = this.loaderEl.querySelector('.loader-text');
             if (txt) txt.textContent = `3D Model yuklanmoqda... ${percent}%`;
           }
-        }
-
-        if (this.loaderEl) {
-          const txt = this.loaderEl.querySelector('.loader-text');
-          if (txt) txt.textContent = `3D Model yuklanmoqda... 100%`;
         }
 
         const combined = new Uint8Array(loaded);
@@ -222,18 +222,30 @@ export class Avatar3DController {
           combined.set(chunk, offset);
           offset += chunk.length;
         }
-        arrayBuffer = combined.buffer;
 
-        // Save into device cache so future visits load in 0.05 seconds
+        if (supportsDecompression) {
+          // Native browser C++ decompression in ~15ms
+          const decompressedStream = new Response(combined).body.pipeThrough(new DecompressionStream('gzip'));
+          arrayBuffer = await new Response(decompressedStream).arrayBuffer();
+        } else {
+          arrayBuffer = combined.buffer;
+        }
+
+        if (this.loaderEl) {
+          const txt = this.loaderEl.querySelector('.loader-text');
+          if (txt) txt.textContent = `3D Model yuklanmoqda... 100%`;
+        }
+
+        // Save into device cache so future visits load in 0.02 seconds
         if ('caches' in window) {
           try {
             const cache = await caches.open(CACHE_NAME);
             const headers = new Headers({
               'Content-Type': 'model/gltf-binary',
-              'Content-Length': String(loaded)
+              'Content-Length': String(arrayBuffer.byteLength)
             });
-            await cache.put(url, new Response(arrayBuffer.slice(0), { headers }));
-            console.log('✅ 3D model qurilma keshiga saqlandi.');
+            await cache.put(CACHE_KEY, new Response(arrayBuffer.slice(0), { headers }));
+            console.log('✅ 3D model qurilma keshiga saqlandi (7.9 MB uncompressed).');
           } catch (cachePutErr) {
             console.warn('Could not store model in CacheStorage:', cachePutErr);
           }
