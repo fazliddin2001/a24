@@ -9,6 +9,14 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
 
@@ -39,12 +47,7 @@
         <span id="statusText">Tayyor (Ready)</span>
       </div>
 
-      <div class="avatar-container" id="avatarContainer">
-        <img src="assets/avatar-idle.webp" alt="ADCHTI Raqamli Assistent" class="avatar-layer active" id="frameIdle" />
-        <img src="assets/avatar-talk-small.webp" alt="" class="avatar-layer" id="frameTalkSmall" />
-        <img src="assets/avatar-talk-open.webp" alt="" class="avatar-layer" id="frameTalkOpen" />
-        <img src="assets/avatar-blink.webp" alt="" class="avatar-layer" id="frameBlink" />
-      </div>
+      <div class="avatar-container" id="avatarContainer"></div>
 
       <h2 class="avatar-title">Malika</h2>
       <p class="avatar-subtitle">Institut ma’lumotlari, statistikasi va talabalar uchun yordamchi</p>
