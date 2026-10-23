@@ -236,6 +236,7 @@ export default {
           gatewayName: env.AI_GATEWAY_NAME || 'NOT SET',
           model: env.GEMINI_MODEL || 'gemini-3.8-flash (default)',
           ttsModel: env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts (default)',
+          liveModel: env.GEMINI_LIVE_MODEL || 'gemini-3.8-live (default)',
           baseUrl: baseUrl
         }, null, 2), {
           status: 200,
@@ -299,6 +300,9 @@ export default {
       if (!token && authHeader && authHeader.startsWith('Bearer ')) {
         token = authHeader.substring(7).trim();
       }
+      if (!token) {
+        token = url.searchParams.get('token');
+      }
 
       const session = await verifySessionToken(token, secret);
       if (!session) {
@@ -333,6 +337,16 @@ export default {
       // === ADMIN: Institute Data (Update with admin_pass) ===
       if (url.pathname === '/api/admin/institute-data' && request.method === 'POST') {
         return handleUpdateInstituteData(request, env);
+      }
+
+      // === LIVE API: Session Config ===
+      if (url.pathname === '/api/live-config' && request.method === 'GET') {
+        return handleLiveConfig(request, env);
+      }
+
+      // === LIVE API: WebSocket Proxy ===
+      if (url.pathname === '/api/live-ws') {
+        return handleLiveWebSocket(request, env);
       }
 
       // === CHAT ===
@@ -618,4 +632,152 @@ async function handleTts(request, env) {
       status: 500, headers: { 'Content-Type': 'application/json' }
     });
   }
+}
+
+// =============================================
+// GEMINI LIVE REALTIME STREAMING HANDLERS
+// =============================================
+
+async function handleLiveConfig(request, env) {
+  try {
+    const instituteContext = await getInstituteContext(env);
+    const systemPrompt = buildSystemPrompt(instituteContext);
+    const apiKey = env.GEMINI_API_KEY || '';
+    const liveModel = env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
+    const voice = env.GEMINI_VOICE || 'Aoede';
+    const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+    const gatewayName = env.AI_GATEWAY_NAME;
+
+    return new Response(JSON.stringify({
+      success: true,
+      model: liveModel,
+      voice: voice,
+      apiKey: apiKey,
+      systemInstruction: systemPrompt,
+      gatewayUrl: (accountId && gatewayName && apiKey)
+        ? `wss://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayName}/google?api_key=${apiKey}`
+        : null,
+      directUrl: apiKey
+        ? `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`
+        : null
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+async function handleLiveWebSocket(request, env) {
+  const upgradeHeader = request.headers.get('Upgrade');
+  if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
+    return new Response('Expected WebSocket Upgrade', { status: 426 });
+  }
+
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return new Response('GEMINI_API_KEY not configured', { status: 500 });
+  }
+
+  const instituteContext = await getInstituteContext(env);
+  const systemPrompt = buildSystemPrompt(instituteContext);
+  const liveModel = env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
+  const voice = env.GEMINI_VOICE || 'Aoede';
+
+  // Target Google Gemini Live WebSocket endpoint
+  const targetUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+
+  let geminiResp;
+  try {
+    const fetchHeaders = { 'Upgrade': 'websocket' };
+    if (env.CF_AIG_TOKEN) {
+      fetchHeaders['cf-aig-authorization'] = `Bearer ${env.CF_AIG_TOKEN}`;
+    }
+    geminiResp = await fetch(targetUrl, { headers: fetchHeaders });
+  } catch (err) {
+    return new Response('Failed to connect to Gemini Live: ' + err.message, { status: 502 });
+  }
+
+  const geminiWs = geminiResp.webSocket;
+  if (!geminiWs) {
+    return new Response('Upstream server did not upgrade to WebSocket', { status: 502 });
+  }
+  geminiWs.accept();
+
+  // Create WebSocket pair for browser client
+  const pair = new WebSocketPair();
+  const [clientWs, serverWs] = Object.values(pair);
+  serverWs.accept();
+
+  // Send the setup message required by Gemini Live
+  const setupMessage = {
+    setup: {
+      model: liveModel.startsWith('models/') ? liveModel : `models/${liveModel}`,
+      generationConfig: {
+        responseModalities: ["AUDIO", "TEXT"],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: {
+              voiceName: voice
+            }
+          }
+        }
+      },
+      systemInstruction: {
+        parts: [{ text: systemPrompt }]
+      },
+      realtimeInputConfig: {
+        automaticActivityDetection: {
+          disabled: true
+        }
+      }
+    }
+  };
+
+  try {
+    geminiWs.send(JSON.stringify(setupMessage));
+  } catch (e) {
+    console.error('Failed to send setup to Gemini:', e);
+  }
+
+  // Forward client messages to Gemini
+  serverWs.addEventListener('message', (event) => {
+    try {
+      geminiWs.send(event.data);
+    } catch (err) {
+      console.error('Client -> Gemini forward error:', err);
+    }
+  });
+
+  // Forward Gemini messages to client
+  geminiWs.addEventListener('message', (event) => {
+    try {
+      serverWs.send(event.data);
+    } catch (err) {
+      console.error('Gemini -> Client forward error:', err);
+    }
+  });
+
+  // Error and close handling
+  serverWs.addEventListener('close', (e) => {
+    try { geminiWs.close(e.code, e.reason); } catch {}
+  });
+  geminiWs.addEventListener('close', (e) => {
+    try { serverWs.close(e.code, e.reason); } catch {}
+  });
+  serverWs.addEventListener('error', () => {
+    try { geminiWs.close(1011, 'Client error'); } catch {}
+  });
+  geminiWs.addEventListener('error', () => {
+    try { serverWs.close(1011, 'Gemini error'); } catch {}
+  });
+
+  return new Response(null, {
+    status: 101,
+    webSocket: clientWs
+  });
 }

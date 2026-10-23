@@ -1,29 +1,101 @@
 /**
- * Audio Pipeline: Microphone recording, base64 encoding, audio-reactive playback,
- * and robust Voice Activity Detection (VAD) with initial grace period & 1-min cap
+ * Audio Pipeline: 16kHz PCM streaming to Gemini Live, small chunks (20-40ms),
+ * client-side manual VAD with 200ms rolling pre-buffer, activityStart / activityEnd turn control,
+ * gapless real-time 24kHz PCM playback scheduling, and audio-reactive 3D lip-sync.
  */
+
+// Downsample Float32 buffer to 16,000 Hz if hardware runs at 44.1k/48k
+function downsampleBuffer(buffer, inSampleRate, outSampleRate = 16000) {
+  if (inSampleRate === outSampleRate) return buffer;
+  const ratio = inSampleRate / outSampleRate;
+  const newLength = Math.round(buffer.length / ratio);
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+    let accum = 0;
+    let count = 0;
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i];
+      count++;
+    }
+    result[offsetResult] = count > 0 ? accum / count : buffer[offsetBuffer];
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+  return result;
+}
+
+// Convert Float32 [-1.0, 1.0] to 16-bit PCM little-endian
+function floatTo16BitPCM(input) {
+  const output = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const s = Math.max(-1, Math.min(1, input[i]));
+    output[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return output;
+}
+
+// Convert Int16Array to Base64 string
+function int16ToBase64(int16Array) {
+  const bytes = new Uint8Array(int16Array.buffer, int16Array.byteOffset, int16Array.byteLength);
+  let binary = '';
+  const len = bytes.byteLength;
+  const CHUNK_SZ = 0x8000;
+  for (let i = 0; i < len; i += CHUNK_SZ) {
+    const sub = bytes.subarray(i, Math.min(i + CHUNK_SZ, len));
+    binary += String.fromCharCode.apply(null, sub);
+  }
+  return btoa(binary);
+}
+
 export class AudioPipeline {
-  constructor(avatarController, waveformBox) {
+  constructor(avatarController, waveformBox, liveClient = null) {
     this.avatar = avatarController;
     this.waveformBox = waveformBox;
+    this.liveClient = liveClient;
+
     this.audioContext = null;
-    this.mediaRecorder = null;
-    this.audioChunks = [];
+    this.playbackCtx = null;
+    this.mediaStream = null;
+    this.micSource = null;
+    this.processor = null;
     this.isRecording = false;
-    this.analyser = null;
-    this.animFrame = null;
-    this.currentSource = null;
-    this.currentAudioElement = null;
+
+    // VAD & Streaming state
+    this.hasSpokenSustained = false;
+    this.hasSentActivityStart = false;
+    this.rollingPreBuffer = []; // ~200ms rolling buffer before speech onset
+    this.MAX_PRE_BUFFER_CHUNKS = 7; // 7 * 32ms ≈ 224ms
     this.autoStopCallback = null;
     this.onPlaybackEnded = null;
 
+    // Playback state
+    this.playbackAnalyser = null;
+    this.nextPlayTime = 0;
+    this.activeLiveSources = [];
+    this.isLiveTurnComplete = false;
+    this.animFrame = null;
+    this.currentSource = null;
+    this.currentAudioElement = null;
+
     this.waveBars = waveformBox ? Array.from(waveformBox.querySelectorAll('.wave-bar')) : [];
+  }
+
+  setLiveClient(client) {
+    this.liveClient = client;
   }
 
   async initAudioContext() {
     if (!this.audioContext) {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      this.audioContext = new AudioCtx();
+      try {
+        // Attempt native 16kHz context if supported
+        this.audioContext = new AudioCtx({ sampleRate: 16000 });
+      } catch (e) {
+        this.audioContext = new AudioCtx();
+      }
     }
     if (this.audioContext.state === 'suspended') {
       await this.audioContext.resume();
@@ -31,67 +103,91 @@ export class AudioPipeline {
     return this.audioContext;
   }
 
-  // --- RECORDING PIPELINE WITH ROBUST VAD & 1-MINUTE TIMEOUT ---
-  /**
-   * Starts recording from microphone.
-   * @param {Function} onAutoStop - Called when user stops speaking (silence detected) or 1 minute elapses.
-   */
-  async startRecording(onAutoStop = null) {
-    await this.initAudioContext();
-    this.audioChunks = [];
-    this.autoStopCallback = onAutoStop;
+  async initPlaybackContext() {
+    if (!this.playbackCtx) {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      this.playbackCtx = new AudioCtx();
+    }
+    if (this.playbackCtx.state === 'suspended') {
+      await this.playbackCtx.resume();
+    }
+    if (!this.playbackAnalyser) {
+      this.playbackAnalyser = this.playbackCtx.createAnalyser();
+      this.playbackAnalyser.fftSize = 256;
+      this.playbackAnalyser.smoothingTimeConstant = 0.65;
+      this.playbackAnalyser.connect(this.playbackCtx.destination);
+    }
+    return this.playbackCtx;
+  }
 
-    const stream = await navigator.mediaDevices.getUserMedia({
+  // --- REALTIME STREAMING RECORDING WITH MANUAL VAD & 200MS BUFFER ---
+  async startRecording(onAutoStop = null) {
+    // Interrupt any current playback before listening
+    this.stopPlayback();
+    await this.initAudioContext();
+
+    this.autoStopCallback = onAutoStop;
+    this.rollingPreBuffer = [];
+    this.hasSpokenSustained = false;
+    this.hasSentActivityStart = false;
+
+    this.mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
         sampleRate: 16000,
         echoCancellation: true,
-        noiseSuppression: true
+        noiseSuppression: true,
+        autoGainControl: true
       }
     });
 
-    let mimeType = 'audio/webm;codecs=opus';
-    if (!MediaRecorder.isTypeSupported(mimeType)) {
-      if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
-      else mimeType = '';
-    }
+    this.micSource = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-    this.mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-
-    // Audio level visualizer & Voice Activity Detection (VAD)
-    const micSource = this.audioContext.createMediaStreamSource(stream);
+    // Analyser node for visualizer & VAD energy monitoring
     const micAnalyser = this.audioContext.createAnalyser();
     micAnalyser.fftSize = 128;
-    micAnalyser.smoothingTimeConstant = 0.4;
-    micSource.connect(micAnalyser);
+    micAnalyser.smoothingTimeConstant = 0.35;
+    this.micSource.connect(micAnalyser);
 
-    const freqData = new Uint8Array(micAnalyser.frequencyBinCount);
+    // BufferSize 512 at 16kHz = 32ms chunks (fits exactly Google's 20-40ms recommendation)
+    const bufferSize = 512;
+    this.processor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
+    this.micSource.connect(this.processor);
+    // Connect processor to destination (muted/silent) to keep Web Audio process loop active
+    this.processor.connect(this.audioContext.destination);
+
     if (this.waveformBox) this.waveformBox.classList.add('active');
 
-    // VAD state variables:
+    // VAD Timing Variables
     const recordingStartTime = Date.now();
     let speechFramesCount = 0;
-    let hasSpokenSustained = false; // User has actually spoken a sentence
     let lastVoiceTime = 0;
+    let autoStopFired = false;
 
-    // Generous thresholds to prevent false cut-offs:
-    // 2.8 seconds of natural silence after sentence completion
-    const SILENCE_LIMIT_MS = 2800;
+    // Generous thresholds:
+    // 2.2 seconds of natural silence after sentence completion
+    const SILENCE_LIMIT_MS = 2200;
     // 6.0 seconds grace period at start for user to formulate their question
     const INITIAL_GRACE_PERIOD_MS = 6000;
-    // 60 seconds (1 minute) hard maximum
+    // 60 seconds hard limit
     const MAX_DURATION_MS = 60000;
-
-    let autoStopFired = false;
 
     const triggerAutoStop = (reason) => {
       if (autoStopFired || !this.isRecording) return;
       autoStopFired = true;
       console.log(`VAD Trigger: ${reason}`);
+
+      // Signal Gemini Live that user has finished speaking
+      if (this.liveClient?.isConnected && this.hasSentActivityStart) {
+        this.liveClient.sendActivityEnd();
+      }
+
       if (this.autoStopCallback) {
         this.autoStopCallback();
       }
     };
+
+    const freqData = new Uint8Array(micAnalyser.frequencyBinCount);
 
     const updateWaveAndVAD = () => {
       if (!this.isRecording) return;
@@ -111,102 +207,245 @@ export class AudioPipeline {
       // Check speech activity (above room background noise)
       if (avgEnergy > 0.08) {
         speechFramesCount++;
-        if (speechFramesCount >= 5) { // Sustained speech ~100ms
-          hasSpokenSustained = true;
+        if (speechFramesCount >= 4) { // Sustained speech ~80-100ms
           lastVoiceTime = now;
+
+          if (!this.hasSpokenSustained) {
+            this.hasSpokenSustained = true;
+
+            // Trigger activityStart to Gemini Live
+            if (this.liveClient?.isConnected && !this.hasSentActivityStart) {
+              this.hasSentActivityStart = true;
+              this.liveClient.sendActivityStart();
+
+              // Send the 200ms rolling buffer so beginning of first word is never lost
+              while (this.rollingPreBuffer.length > 0) {
+                const chunk = this.rollingPreBuffer.shift();
+                this.liveClient.sendAudioChunk(chunk);
+              }
+            }
+          }
         }
       } else {
         speechFramesCount = Math.max(0, speechFramesCount - 1);
       }
 
-      // 1. User has spoken, and now silence has lasted >= 2.8 seconds -> Auto stop!
-      if (hasSpokenSustained && lastVoiceTime > 0 && (now - lastVoiceTime >= SILENCE_LIMIT_MS)) {
-        triggerAutoStop('Nutq yakunlandi va 2.8s jimlik saqlandi');
+      // 1. User has spoken, and now silence has lasted >= SILENCE_LIMIT_MS -> Auto stop!
+      if (this.hasSpokenSustained && lastVoiceTime > 0 && (now - lastVoiceTime >= SILENCE_LIMIT_MS)) {
+        triggerAutoStop('Nutq yakunlandi va jimlik saqlandi');
         return;
       }
 
       // 2. 6 seconds passed since mic opened without any speech -> Auto stop!
-      if (!hasSpokenSustained && (now - recordingStartTime >= INITIAL_GRACE_PERIOD_MS)) {
-        triggerAutoStop('6s davomida hech qanday ovoz aytilmadi');
+      if (!this.hasSpokenSustained && (now - recordingStartTime >= INITIAL_GRACE_PERIOD_MS)) {
+        triggerAutoStop('6s davomida ovoz eshitilmadi');
         return;
       }
 
       // 3. 1 minute maximum duration limit reached -> Auto stop!
       if (now - recordingStartTime >= MAX_DURATION_MS) {
-        triggerAutoStop('1 daqiqalik maksimal vaqt chegarasiga yetildi');
+        triggerAutoStop('1 daqiqalik maksimal vaqt yakunlandi');
         return;
       }
 
       requestAnimationFrame(updateWaveAndVAD);
     };
 
-    this.mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) this.audioChunks.push(e.data);
+    // Live PCM audio processing callback (fires every ~32ms)
+    this.processor.onaudioprocess = (e) => {
+      if (!this.isRecording) return;
+      const rawChannel = e.inputBuffer.getChannelData(0);
+
+      // Downsample to 16,000 Hz if necessary
+      const downsampled = downsampleBuffer(rawChannel, this.audioContext.sampleRate, 16000);
+      const pcm16 = floatTo16BitPCM(downsampled);
+      const base64Chunk = int16ToBase64(pcm16);
+
+      if (this.hasSentActivityStart) {
+        // Stream live chunks as they arrive directly to Gemini Live
+        if (this.liveClient?.isConnected) {
+          this.liveClient.sendAudioChunk(base64Chunk);
+        }
+      } else {
+        // Maintain rolling ~200ms pre-buffer while waiting for speech onset
+        this.rollingPreBuffer.push(base64Chunk);
+        if (this.rollingPreBuffer.length > this.MAX_PRE_BUFFER_CHUNKS) {
+          this.rollingPreBuffer.shift();
+        }
+      }
     };
 
-    this.mediaRecorder.onstart = () => {
-      this.isRecording = true;
-      this.avatar.setState('listening');
-      updateWaveAndVAD();
-    };
-
-    this.mediaRecorder.start(100);
+    this.isRecording = true;
+    this.avatar.setState('listening');
+    updateWaveAndVAD();
   }
 
   async stopRecording() {
-    return new Promise((resolve, reject) => {
-      if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
-        resolve(null);
+    if (!this.isRecording) return null;
+    this.isRecording = false;
+
+    if (this.waveformBox) {
+      this.waveformBox.classList.remove('active');
+      this.waveBars.forEach((bar) => (bar.style.height = '8px'));
+    }
+
+    if (this.processor) {
+      try {
+        this.processor.disconnect();
+      } catch {}
+      this.processor = null;
+    }
+
+    if (this.micSource) {
+      try {
+        this.micSource.disconnect();
+      } catch {}
+      this.micSource = null;
+    }
+
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach((track) => track.stop());
+      this.mediaStream = null;
+    }
+
+    // If activityStart was sent, ensure activityEnd is sent to trigger Gemini response
+    if (this.liveClient?.isConnected && this.hasSentActivityStart) {
+      this.liveClient.sendActivityEnd();
+    }
+
+    return { liveStreamed: true };
+  }
+
+  // --- REALTIME STREAMING PLAYBACK & 3D LIP-SYNC PIPELINE ---
+  async queueLiveAudioChunk(base64Data, mimeType = 'audio/pcm;rate=24000') {
+    await this.initPlaybackContext();
+
+    try {
+      const binary = atob(base64Data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+
+      const sampleRate = mimeType.includes('rate=16000') ? 16000 : 24000;
+      const audioBuffer = this.playbackCtx.createBuffer(1, int16.length, sampleRate);
+      const channelData = audioBuffer.getChannelData(0);
+      for (let i = 0; i < int16.length; i++) {
+        channelData[i] = int16[i] / 32768.0;
+      }
+
+      const source = this.playbackCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.playbackAnalyser);
+
+      const now = this.playbackCtx.currentTime;
+      const startTime = Math.max(now + 0.015, this.nextPlayTime);
+      source.start(startTime);
+      this.nextPlayTime = startTime + audioBuffer.duration;
+
+      this.activeLiveSources.push(source);
+      this.avatar.setState('speaking');
+      this.startLipSyncLoop();
+
+      source.onended = () => {
+        const idx = this.activeLiveSources.indexOf(source);
+        if (idx > -1) this.activeLiveSources.splice(idx, 1);
+
+        if (this.activeLiveSources.length === 0 && this.isLiveTurnComplete) {
+          this.handleLivePlaybackFinished();
+        }
+      };
+    } catch (err) {
+      console.warn('Live audio chunk decode error:', err);
+    }
+  }
+
+  markLiveTurnComplete() {
+    this.isLiveTurnComplete = true;
+    if (this.activeLiveSources.length === 0) {
+      this.handleLivePlaybackFinished();
+    }
+  }
+
+  handleLivePlaybackFinished() {
+    this.stopLipSyncLoop();
+    this.avatar.setState('idle');
+    this.avatar.setMouthOpen(0.16);
+    this.isLiveTurnComplete = false;
+    this.nextPlayTime = 0;
+    if (this.onPlaybackEnded) {
+      this.onPlaybackEnded();
+    }
+  }
+
+  startLipSyncLoop() {
+    if (this.animFrame) return;
+    const samples = new Uint8Array(this.playbackAnalyser.fftSize);
+
+    const monitorLipSync = () => {
+      if (this.activeLiveSources.length === 0 && this.isLiveTurnComplete) {
+        this.stopLipSyncLoop();
         return;
       }
 
-      this.mediaRecorder.onstop = async () => {
-        this.isRecording = false;
-        if (this.waveformBox) {
-          this.waveformBox.classList.remove('active');
-          this.waveBars.forEach(bar => bar.style.height = '8px');
-        }
+      this.playbackAnalyser.getByteTimeDomainData(samples);
+      let energy = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const norm = (samples[i] - 128) / 128;
+        energy += norm * norm;
+      }
+      const rms = Math.sqrt(energy / samples.length);
 
-        // Stop all mic tracks
-        this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+      // Reverted smooth lip-sync formula
+      const mouthVal = 0.16 + Math.min(0.84, Math.max(0, rms - 0.012) * 14.5);
+      this.avatar.setMouthOpen(mouthVal);
 
-        const blob = new Blob(this.audioChunks, { type: this.mediaRecorder.mimeType || 'audio/webm' });
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const base64Data = reader.result.split(',')[1];
-          resolve({
-            data: base64Data,
-            mimeType: blob.type
-          });
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      };
+      this.animFrame = requestAnimationFrame(monitorLipSync);
+    };
 
-      this.mediaRecorder.stop();
-    });
+    this.animFrame = requestAnimationFrame(monitorLipSync);
   }
 
-  // --- PLAYBACK & RESTORED LIP-SYNC PIPELINE ---
+  stopLipSyncLoop() {
+    if (this.animFrame) {
+      cancelAnimationFrame(this.animFrame);
+      this.animFrame = null;
+    }
+    this.avatar.setMouthOpen(0.16);
+  }
+
   stopPlayback() {
+    // Stop all active streaming live audio sources
+    for (const src of this.activeLiveSources) {
+      try {
+        src.stop();
+      } catch {}
+    }
+    this.activeLiveSources = [];
+    this.nextPlayTime = 0;
+    this.isLiveTurnComplete = false;
+
     if (this.currentAudioElement) {
       this.currentAudioElement.pause();
       this.currentAudioElement = null;
     }
     if (this.currentSource) {
-      try { this.currentSource.stop(); } catch {}
+      try {
+        this.currentSource.stop();
+      } catch {}
       this.currentSource = null;
     }
-    if (this.animFrame) {
-      cancelAnimationFrame(this.animFrame);
-      this.animFrame = null;
-    }
+
+    this.stopLipSyncLoop();
     this.avatar.setState('idle');
+    this.avatar.setMouthOpen(0.16);
   }
 
+  // --- TRADITIONAL BASE64 AUDIO PLAYBACK (Fallback & Replay) ---
   async playBase64Audio(base64Data, mimeType = 'audio/mp3') {
     this.stopPlayback();
-    await this.initAudioContext();
+    await this.initPlaybackContext();
 
     const binaryStr = atob(base64Data);
     const bytes = new Uint8Array(binaryStr.length);
@@ -214,25 +453,20 @@ export class AudioPipeline {
       bytes[i] = binaryStr.charCodeAt(i);
     }
 
-    // Standard Web Audio buffer decode (supports WAV, MP3, AAC, OGG)
     try {
-      const audioBuffer = await this.audioContext.decodeAudioData(bytes.buffer.slice(0));
+      const audioBuffer = await this.playbackCtx.decodeAudioData(bytes.buffer.slice(0));
       this.playAudioBuffer(audioBuffer);
     } catch (decodeErr) {
-      // Fallback: raw 24kHz 16-bit PCM from Gemini
       try {
         const pcmBuffer = this.pcmToAudioBuffer(bytes, 24000);
         this.playAudioBuffer(pcmBuffer);
       } catch (pcmErr) {
-        // Fallback: standard HTMLAudioElement blob
         const blob = new Blob([bytes], { type: mimeType });
         const audioUrl = URL.createObjectURL(blob);
         const audio = new Audio(audioUrl);
         this.currentAudioElement = audio;
 
         this.avatar.setState('speaking');
-        this.avatar.startPulse(4000);
-
         audio.onended = () => {
           this.avatar.setState('idle');
           URL.revokeObjectURL(audioUrl);
@@ -244,52 +478,26 @@ export class AudioPipeline {
   }
 
   playAudioBuffer(buffer) {
-    const source = this.audioContext.createBufferSource();
+    const source = this.playbackCtx.createBufferSource();
     source.buffer = buffer;
-
-    const analyser = this.audioContext.createAnalyser();
-    analyser.fftSize = 256;
-    analyser.smoothingTimeConstant = 0.65;
-
-    source.connect(analyser);
-    analyser.connect(this.audioContext.destination);
+    source.connect(this.playbackAnalyser);
 
     this.currentSource = source;
     this.avatar.setState('speaking');
-
-    const samples = new Uint8Array(analyser.fftSize);
-
-    const monitorLipSync = () => {
-      analyser.getByteTimeDomainData(samples);
-      let energy = 0;
-      for (let i = 0; i < samples.length; i++) {
-        const norm = (samples[i] - 128) / 128;
-        energy += norm * norm;
-      }
-      const rms = Math.sqrt(energy / samples.length);
-
-      // Map RMS volume directly to mouth openness (reverted to original working logic)
-      const mouthVal = 0.16 + Math.min(0.84, Math.max(0, rms - 0.012) * 14.5);
-      this.avatar.setMouthOpen(mouthVal);
-
-      this.animFrame = requestAnimationFrame(monitorLipSync);
-    };
+    this.startLipSyncLoop();
 
     source.onended = () => {
-      if (this.animFrame) cancelAnimationFrame(this.animFrame);
-      this.animFrame = null;
+      this.stopLipSyncLoop();
       this.avatar.setState('idle');
-      this.avatar.setMouthOpen(0.16);
       if (this.onPlaybackEnded) this.onPlaybackEnded();
     };
 
     source.start(0);
-    monitorLipSync();
   }
 
   pcmToAudioBuffer(uint8Bytes, sampleRate = 24000) {
     const int16Array = new Int16Array(uint8Bytes.buffer, uint8Bytes.byteOffset, uint8Bytes.byteLength / 2);
-    const audioBuffer = this.audioContext.createBuffer(1, int16Array.length, sampleRate);
+    const audioBuffer = this.playbackCtx.createBuffer(1, int16Array.length, sampleRate);
     const channelData = audioBuffer.getChannelData(0);
 
     for (let i = 0; i < int16Array.length; i++) {

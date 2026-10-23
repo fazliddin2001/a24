@@ -3,6 +3,7 @@ import { AudioPipeline } from './audio.js';
 import { AuthManager } from './auth.js';
 import { WakeWordListener } from './wakeword.js';
 import { AdminPanelController } from './admin.js';
+import { GeminiLiveClient } from './live.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   // DOM Elements
@@ -29,14 +30,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Controllers
   const avatar = new AvatarController(avatarEl, statusText, statusDot, statusSection);
-  const audio = new AudioPipeline(avatar, waveformBox);
+  const liveClient = new GeminiLiveClient();
+  const audio = new AudioPipeline(avatar, waveformBox, liveClient);
   const adminPanel = new AdminPanelController();
 
-  // Conversation State
+  // Conversation & Streaming State
   let conversationHistory = [];
   let turnCount = 1;
   const MAX_TURNS = 4;
   let isRecording = false;
+
+  let currentAssistantBubble = null;
+  let currentAssistantTextSpan = null;
+  let accumulatedAssistantText = '';
 
   const updateTurnUI = () => {
     if (turnCounter) turnCounter.textContent = `${turnCount} / ${MAX_TURNS}`;
@@ -53,13 +59,24 @@ document.addEventListener('DOMContentLoaded', () => {
     if (notify) {
       appendSystemNotice("Suhbat yangilandi. Yangi savolingizni so'rashingiz mumkin.");
     }
+    // Reconnect live session to refresh context
+    if (liveClient.isConnected) {
+      liveClient.disconnect();
+      setTimeout(() => liveClient.connect(), 300);
+    }
   };
 
   // Auth initialization
   const auth = new AuthManager(authModal, authError, authInput, authBtn, () => {
     console.log('Foydalanuvchi tasdiqlandi');
+    liveClient.connect();
   });
-  auth.checkAuth();
+
+  auth.checkAuth().then((authed) => {
+    if (authed) {
+      liveClient.connect();
+    }
+  });
 
   // Reset Button
   resetBtn.addEventListener('click', () => {
@@ -74,7 +91,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
 
-    // If assistant has a thinking reasoning block, add a neat collapsible toggle
     if (role === 'assistant' && thought) {
       const toggle = document.createElement('div');
       toggle.className = 'thought-toggle';
@@ -97,7 +113,6 @@ document.addEventListener('DOMContentLoaded', () => {
     textSpan.textContent = text;
     bubble.appendChild(textSpan);
 
-    // Audio replay button if audio is attached
     if (role === 'assistant' && audioBase64) {
       const replayBtn = document.createElement('button');
       replayBtn.className = 'message-audio-btn';
@@ -112,6 +127,28 @@ document.addEventListener('DOMContentLoaded', () => {
     msgDiv.appendChild(bubble);
     chatHistory.appendChild(msgDiv);
     chatHistory.scrollTop = chatHistory.scrollHeight;
+    return { msgDiv, bubble, textSpan };
+  }
+
+  function createStreamingAssistantBubble() {
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'message assistant';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble';
+
+    const textSpan = document.createElement('div');
+    textSpan.className = 'message-text';
+    textSpan.textContent = '';
+    bubble.appendChild(textSpan);
+
+    msgDiv.appendChild(bubble);
+    chatHistory.appendChild(msgDiv);
+    chatHistory.scrollTop = chatHistory.scrollHeight;
+
+    currentAssistantBubble = bubble;
+    currentAssistantTextSpan = textSpan;
+    return { msgDiv, bubble, textSpan };
   }
 
   function appendSystemNotice(text) {
@@ -126,7 +163,66 @@ document.addEventListener('DOMContentLoaded', () => {
     chatHistory.scrollTop = chatHistory.scrollHeight;
   }
 
-  // --- RECORDING WORKFLOW WITH VAD (SILENCE & 1-MIN CAP) ---
+  // --- GEMINI LIVE STREAMING EVENT HANDLERS ---
+  liveClient.onOpen = () => {
+    console.log('⚡ Gemini Live sessiyasi faollashtirildi (Low-Latency)');
+  };
+
+  liveClient.onClose = () => {
+    console.log('Gemini Live sessiyasi yopildi, kerak bo\'lganda qayta ulanadi');
+  };
+
+  liveClient.onInterrupted = () => {
+    console.log('⚡ Gemini Live: Foydalanuvchi nutqi orqali to\'xtatildi');
+    audio.stopPlayback();
+    avatar.setState('listening');
+  };
+
+  liveClient.onTextPart = (chunk) => {
+    if (!currentAssistantBubble) {
+      createStreamingAssistantBubble();
+    }
+    accumulatedAssistantText += chunk;
+    if (currentAssistantTextSpan) {
+      currentAssistantTextSpan.textContent = accumulatedAssistantText;
+      chatHistory.scrollTop = chatHistory.scrollHeight;
+    }
+  };
+
+  liveClient.onAudioChunk = (base64Data, mimeType) => {
+    // Instant streaming audio chunk playback with zero gap
+    audio.queueLiveAudioChunk(base64Data, mimeType);
+  };
+
+  liveClient.onTurnComplete = () => {
+    audio.markLiveTurnComplete();
+
+    if (accumulatedAssistantText) {
+      conversationHistory.push({
+        role: 'user',
+        parts: [{ text: 'Foydalanuvchi savol berdi' }]
+      });
+      conversationHistory.push({
+        role: 'model',
+        parts: [{ text: accumulatedAssistantText }]
+      });
+      turnCount++;
+      updateTurnUI();
+
+      if (turnCount > MAX_TURNS) {
+        setTimeout(() => {
+          resetConversation(true);
+        }, 3000);
+      }
+    }
+  };
+
+  // Resume wake-word listening automatically when assistant completes speaking
+  audio.onPlaybackEnded = () => {
+    wakeWord.resume();
+  };
+
+  // --- RECORDING WORKFLOW WITH LOW-LATENCY REALTIME STREAMING ---
   async function startRecordingFlow() {
     if (isRecording) return;
     try {
@@ -135,7 +231,16 @@ document.addEventListener('DOMContentLoaded', () => {
       micBtn.classList.add('recording');
       micBtn.innerHTML = '⏹';
 
-      // startRecording accepts onAutoStop callback (fired by 1.8s silence or 60s max)
+      // Reset streaming text state for new turn
+      currentAssistantBubble = null;
+      currentAssistantTextSpan = null;
+      accumulatedAssistantText = '';
+
+      // Ensure live WebSocket connection is open
+      if (!liveClient.isConnected) {
+        liveClient.connect();
+      }
+
       await audio.startRecording(async () => {
         await stopRecordingFlow();
       });
@@ -155,15 +260,18 @@ document.addEventListener('DOMContentLoaded', () => {
     micBtn.classList.remove('recording');
     micBtn.innerHTML = '🎙';
 
-    const audioData = await audio.stopRecording();
-    if (audioData) {
-      submitQuery({ audioData });
-    } else {
-      wakeWord.resume();
+    avatar.setState('thinking');
+    appendMessage('user', '🎙 Ovozli savol berildi...');
+
+    const result = await audio.stopRecording();
+
+    // If liveClient was not connected, fallback to traditional POST /api/chat
+    if (!liveClient.isConnected && result && !result.liveStreamed) {
+      submitQuery({ audioData: result });
     }
   }
 
-  // Submit User Request (Audio or Text)
+  // Fallback submitQuery for typed text or when live session is disconnected
   async function submitQuery({ audioData, text }) {
     if (avatar.state === 'thinking' || avatar.state === 'speaking') return;
 
@@ -214,24 +322,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const data = await res.json();
 
-      // Render assistant message
       appendMessage('assistant', data.text, data.thought, data.audio);
 
-      // Save to history
       conversationHistory.push({
         role: 'user',
-        parts: text ? [{ text }] : [{ text: 'Foydalanuvchi ovozli savol berdi' }]
+        parts: text ? [{ text }] : [{ text: 'Foydalanuvchi savol berdi' }]
       });
       conversationHistory.push({
         role: 'model',
         parts: [{ text: data.text }]
       });
 
-      // Update turn counter
       turnCount = (data.turnCount || turnCount) + 1;
       updateTurnUI();
 
-      // Play returned TTS audio (which drives smooth 3D lip-sync)
       if (data.audio) {
         audio.playBase64Audio(data.audio, data.audioMimeType || 'audio/mp3');
       } else {
@@ -239,7 +343,6 @@ document.addEventListener('DOMContentLoaded', () => {
         wakeWord.resume();
       }
 
-      // Check context turn limit (3-4 turns)
       if (data.shouldReset || turnCount > MAX_TURNS) {
         setTimeout(() => {
           resetConversation(true);
@@ -271,7 +374,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }, 1600);
 
-      // Automatically activate recording
+      // Automatically activate recording flow
       startRecordingFlow();
     },
     (isActive, status) => {
@@ -286,11 +389,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
   );
-
-  // Resume wake-word listening automatically when assistant completes speaking
-  audio.onPlaybackEnded = () => {
-    wakeWord.resume();
-  };
 
   // Toggle wake word manually via badge click
   if (wakeBadge) {
@@ -319,7 +417,21 @@ document.addEventListener('DOMContentLoaded', () => {
     const val = textInput.value.trim();
     if (!val) return;
     textInput.value = '';
-    submitQuery({ text: val });
+
+    if (avatar.state === 'thinking' || avatar.state === 'speaking') return;
+
+    wakeWord.pause();
+
+    if (liveClient.isConnected) {
+      appendMessage('user', val);
+      avatar.setState('thinking');
+      currentAssistantBubble = null;
+      currentAssistantTextSpan = null;
+      accumulatedAssistantText = '';
+      liveClient.sendTextMessage(val);
+    } else {
+      submitQuery({ text: val });
+    }
   }
 
   sendBtn.addEventListener('click', handleTextSend);
@@ -331,7 +443,18 @@ document.addEventListener('DOMContentLoaded', () => {
   quickChips.forEach(chip => {
     chip.addEventListener('click', () => {
       const q = chip.getAttribute('data-q');
-      if (q) submitQuery({ text: q });
+      if (q) {
+        if (liveClient.isConnected) {
+          appendMessage('user', q);
+          avatar.setState('thinking');
+          currentAssistantBubble = null;
+          currentAssistantTextSpan = null;
+          accumulatedAssistantText = '';
+          liveClient.sendTextMessage(q);
+        } else {
+          submitQuery({ text: q });
+        }
+      }
     });
   });
 
